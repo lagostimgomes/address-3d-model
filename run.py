@@ -19,7 +19,7 @@ HOSTS = [
     ('raw.githubusercontent.com', 'https://raw.githubusercontent.com/hobuinc/usgs-lidar/master/README.md', True),
     ('s3-us-west-2.amazonaws.com', 'https://s3-us-west-2.amazonaws.com/usgs-lidar-public/MD_Western_2_D21/ept.json', True),
     ('elevation.nationalmap.gov', 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer?f=json', True),
-    ('overpass-api.de', 'https://overpass-api.de/api/status', False),
+    ('overpass-api.de', 'https://overpass-api.de/api/interpreter?data=%5Bout%3Ajson%5D%3Bnode%280%2C0%2C0.0001%2C0.0001%29%3Bout%3B', False),
     ('services.arcgis.com', 'https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/Address_Points_from_National_Address_Database_view/FeatureServer/0?f=json', False),
 ]
 
@@ -44,6 +44,15 @@ def preflight(skip_geocode):
     if not skip_geocode and not geo_ok:
         blocked_req += ['geocoding.geo.census.gov', 'nominatim.openstreetmap.org']
     return res, blocked_req
+
+
+def fetch_supports_bounds(py):
+    """The expansion flags are part of the data-v2 fetch contract; older fetchers simply skip expansion."""
+    try:
+        h = subprocess.run([py, os.path.join(ROOT, 'pipeline', 'fetch', 'fetch_site.py'), '--help'], capture_output=True, text=True, timeout=30).stdout
+        return '--bounds-ft' in h and '--expand-into' in h
+    except Exception:
+        return False
 
 
 def step(cmd, code, label):
@@ -108,21 +117,31 @@ def main():
         fetch[fetch.index('--out-root') + 1] = work
         step(fetch, 4, 'fetch (retry)')
     if loc: json.dump(loc, open(os.path.join(folder, 'locate.json'), 'w'), indent=1)
-    if res and not res.get('overpass-api.de', True):
-        print('\n== osm: skipped (overpass-api.de unreachable in preflight); paving comes from LiDAR', flush=True)
-    else:
-        print('\n== osm (streets and footprints; optional)', flush=True)
-        subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder], timeout=120)
+    # mapped footprints, streets and surfaces: always attempted (the preflight probe can give false negatives);
+    # skipped only if fetch already wrote features.json. Failure is not fatal: outlines then come from LiDAR.
+    if not os.path.exists(os.path.join(folder, 'features.json')):
+        print('\n== osm (footprints, streets, surfaces; optional)', flush=True)
+        try: subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder], timeout=180)
+        except subprocess.TimeoutExpired: print('osm: timed out; continuing without mapped features', flush=True)
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'analyze_site.py'), folder], 5, 'analyze')
+    # coverage: if a selected building reaches the edge of the downloaded data, ask fetch once for the area
+    # analyze wants (scene.coverage.wanted_bounds_ft), then analyze again. Still clipped -> 'incomplete'.
+    cov = json.load(open(os.path.join(folder, 'scene.json'))).get('coverage') or {}
+    if cov.get('wanted_bounds_ft') and fetch_supports_bounds(py):
+        b = cov['wanted_bounds_ft']
+        print(f"\n== coverage: {len(cov.get('edge_touching', []))} building(s) at the data edge; fetching once more for {b}", flush=True)
+        r = subprocess.run(fetch + ['--bounds-ft', ','.join(str(v) for v in b), '--expand-into', folder])
+        if r.returncode == 0:
+            step([py, os.path.join(ROOT, 'pipeline', 'build', 'analyze_site.py'), folder], 5, 'analyze (expanded)')
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'build_model.py'), folder], 6, 'build')
     scene = json.load(open(os.path.join(folder, 'scene.json')))
     site = json.load(open(os.path.join(folder, 'site.json')))
     summary = dict(ok=True, html=os.path.join(folder, 'index.html'), folder=folder, address=site['address'],
                    matched_address=(loc or {}).get('matched_address') or site.get('matched_address'),
                    location_source=(loc or {}).get('source', 'coordinates'), location_precision=(loc or {}).get('precision', 'given'),
-                   lat=site['lat'], lon=site['lon'], street_source=scene['street']['source'],
+                   lat=site['lat'], lon=site['lon'], street_source=scene['street']['source'], coverage=(scene.get('coverage') or {}).get('status'),
                    datasets=[f"{d['name']} ({d['year']})" for d in scene['datasets']],
-                   houses=[{k: h.get(k) for k in ('id', 'role', 'w', 'd', 'wall_h', 'ridge_h', 'stories')} | {'roof': h['roof']['type'], 'pitch': h['roof'].get('pitch_deg')} for h in scene['houses']],
+                   houses=[{k: h.get(k) for k in ('id', 'role', 'name', 'w', 'd', 'wall_h', 'ridge_h', 'stories')} | {'roof': h['roof']['type'], 'pitch': h['roof'].get('pitch_deg'), 'outline': (h.get('provenance') or {}).get('outline'), 'doors': len(h.get('doors') or [])} for h in scene['houses']],
                    trees=len(scene['trees']))
     print('RESULT: ' + json.dumps(summary))
 

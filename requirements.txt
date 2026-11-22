@@ -3,3 +3,4 @@ scipy
 laspy[lazrs]
 Pillow
 scikit-image
+shapely

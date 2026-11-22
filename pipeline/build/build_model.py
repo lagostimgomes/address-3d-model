@@ -24,6 +24,8 @@ traditional (punched windows with white trim) or modern | glass (ribbon windows)
 import argparse, json, math, os, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+import sys; sys.path.insert(0, HERE)
+from analyze_site import dem_bounds  # noqa: E402
 PALETTE = ['#cbc5b6', '#a6a8a3', '#c4c5bf', '#d9d4c7', '#b9b2a2', '#9fa7ad', '#e2ddd2', '#b7ae9c']
 DOORS = ['#2a2d31', '#1d1f22', '#5b2a26', '#24384a', '#f2f1ec']
 GARAGE = ['#f0efea', '#e8e6df', '#5d7d97', '#2f4636', '#1e2023']
@@ -118,20 +120,62 @@ def label_neighbors(scene, folder):
         if best: hh['number'] = best[1]; hh['street'] = best[2]
 
 
+def ground_features(folder, scene):
+    """Mapped ground for the page: road/path centrelines with widths and surface polygons, clipped to the
+    DEM rectangle. Widths come from the map (width tag, else lanes), else a default for the road class,
+    and each way says which (the page lists defaults as generated)."""
+    from analyze_site import load_features
+    from shapely.geometry import LineString, Polygon, box
+    F = load_features(folder)
+    b = scene.get('dem_bounds_ft'); bb = box(b[0], b[2], b[1], b[3])
+    ways, surfaces = [], []
+    for w in F.get('ways', []):
+        k = w['kind']
+        if k in ('proposed', 'construction', 'corridor', 'elevator', 'platform', 'bus_stop', 'raceway') or w.get('tunnel') in ('yes', 'building_passage'): continue
+        try: ls = LineString(w['centerline']).intersection(bb)
+        except Exception: continue
+        if ls.is_empty: continue
+        wf, src = w.get('width_ft'), w.get('width_source')
+        if not wf and w.get('lanes'):
+            try: wf = float(w['lanes']) * 11 + (2 if k in VEH_ROADS else 0); src = 'lanes'
+            except ValueError: pass
+        if not wf:
+            wf = default_width(k, w); src = 'default'
+        for g in getattr(ls, 'geoms', [ls]):
+            if g.geom_type == 'LineString' and g.length > 1:
+                ways.append(dict(k=k, w=round(wf, 1), ws=src, f=w.get('footway'), sv=w.get('service'), br=1 if w.get('bridge') == 'yes' else 0,
+                                 pts=[[round(x, 1), round(z, 1)] for x, z in g.coords]))
+    for sf in F.get('surfaces', []):
+        try: pg = Polygon(sf['polygon'], sf.get('holes') or []).buffer(0).intersection(bb)
+        except Exception: continue
+        for g in getattr(pg, 'geoms', [pg]):
+            if g.geom_type == 'Polygon' and g.area > 20:
+                surfaces.append(dict(k=sf['kind'], ring=[[round(x, 1), round(z, 1)] for x, z in g.exterior.coords[:-1]],
+                                     holes=[[[round(x, 1), round(z, 1)] for x, z in h.coords[:-1]] for h in g.interiors]))
+    order = {'lawn': 0, 'pitch': 1, 'parking': 2, 'plaza': 3, 'road_area': 4, 'other_paved': 4, 'pool': 5, 'water': 5}
+    surfaces.sort(key=lambda s_: order.get(s_['k'], 3))
+    return dict(ways=ways, surfaces=surfaces)
+
+
+VEH_ROADS = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street'}
+TOTAL_W = {'motorway': 48, 'trunk': 44, 'primary': 40, 'secondary': 34, 'tertiary': 30, 'residential': 28, 'unclassified': 22,
+           'living_street': 18, 'motorway_link': 18, 'trunk_link': 18, 'primary_link': 18, 'secondary_link': 18, 'tertiary_link': 18,
+           'pedestrian': 14, 'track': 10, 'footway': 5, 'path': 5, 'cycleway': 6, 'bridleway': 6, 'steps': 6}
+
+
+def default_width(k, w):
+    if k == 'service':
+        return {'driveway': 10, 'parking_aisle': 22, 'alley': 12, 'drive-through': 11}.get(w.get('service'), 14)
+    if k == 'footway' and w.get('footway') == 'crossing': return 8
+    return TOTAL_W.get(k, 12)
+
+
 def build(folder, out=None):
     site = json.load(open(os.path.join(folder, 'site.json')))
     dem = json.load(open(os.path.join(folder, 'dem.json')))
     scene = json.load(open(os.path.join(folder, 'scene.json')))
-    roads = []
-    rp = os.path.join(folder, 'roads.json')
-    if os.path.exists(rp):
-        r = json.load(open(rp)); r = r.get('roads', []) if isinstance(r, dict) else r
-        for w in r:
-            pts = w.get('points') or w.get('pts') or []
-            hw = w.get('highway') or (w.get('tags') or {}).get('highway') or 'residential'
-            if len(pts) >= 2 and hw not in ('footway', 'path', 'steps', 'cycleway', 'bridleway', 'pedestrian', 'track', 'corridor', 'proposed', 'construction'):
-                roads.append(dict(hw=hw, name=w.get('name') or (w.get('tags') or {}).get('name'), pts=[[round(p[0], 1), round(p[1], 1)] for p in pts]))
-    label_neighbors(scene, folder)
+    ground = ground_features(folder, scene)
+    if not os.path.exists(os.path.join(folder, 'features.json')): label_neighbors(scene, folder)
     lp = os.path.join(folder, 'locate.json'); loc = json.load(open(lp)) if os.path.exists(lp) else {}
     pad = scene['pad_ft']
     grid = ','.join(str(int(round((v - pad) * 10))) for v in dem['elevations_ft'])
@@ -149,8 +193,9 @@ def build(folder, out=None):
     title = m.group(1).strip() if m else site['address']
     sub = m.group(2).strip() if m else ''
     years = sorted({d['year'] for d in scene['datasets'] if d['year']}, reverse=True)
-    data = dict(title=title, sub=sub, lat=site['lat'], lon=site['lon'], pad=pad, n=dem['rows'], cell=dem['cell_size_ft'],
-                houses=houses, trees=scene['trees'], roads=roads, front=scene['street']['front'], pavement=scene.get('pavement'),
+    data = dict(title=title, sub=sub, lat=site['lat'], lon=site['lon'], pad=pad, rows=dem['rows'], cols=dem.get('cols', dem['rows']),
+                cell=dem['cell_size_ft'], bounds=scene.get('dem_bounds_ft') or dem_bounds(dem), coverage=scene.get('coverage'),
+                houses=houses, trees=scene['trees'], ground=ground, front=scene['street']['front'], pavement=scene.get('pavement'),
                 site=scene['site'], outline=scene.get('outline'), buffer_ft=scene.get('buffer_ft', 100),
                 site_name=enr['site_name'], fact_sources=enr['sources'], feat_name=feat.get('name'),
                 street_source=scene['street']['source'], street=street_name,
@@ -161,7 +206,7 @@ def build(folder, out=None):
     html = tpl.replace('__TITLE__', title).replace('/*__DATA__*/null', json.dumps(data, separators=(',', ':'))).replace('__GRID__', grid)
     out = out or os.path.join(folder, 'index.html')
     open(out, 'w', encoding='utf-8').write(html)
-    print(f'wrote {out} ({len(html)/1024:.0f} KB): {len(houses)} houses, {len(scene["trees"])} trees, {len(roads)} roads')
+    print(f'wrote {out} ({len(html)/1024:.0f} KB): {len(houses)} buildings, {len(scene["trees"])} trees, {len(ground["ways"])} ways, {len(ground["surfaces"])} surfaces')
     return out
 
 

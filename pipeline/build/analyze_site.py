@@ -11,6 +11,7 @@ Needs: numpy, scipy, laspy[lazrs].
 """
 import argparse, glob, json, math, os, re, sys
 import numpy as np
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 FT = 3.28084
 NONBUILD = {2, 7, 9, 17, 18}          # ground, noise, water, bridge deck, high noise
@@ -18,31 +19,46 @@ rng = np.random.default_rng(7)
 
 
 # ---------------------------------------------------------------- inputs
+def dem_bounds(dem):
+    """[xmin, xmax, zmin, zmax] outer cell edges in the model frame (Codex's dem.json bounds_ft; may be
+    asymmetric). Legacy files without it are centred on the origin."""
+    c, R, C = dem['cell_size_ft'], dem['rows'], dem.get('cols', dem['rows'])
+    b = dem.get('bounds_ft')
+    if b:
+        assert abs((b[1] - b[0]) - C * c) < 0.05 and abs((b[3] - b[2]) - R * c) < 0.05, 'dem.json bounds_ft disagree with rows/cols'
+        return [float(v) for v in b]
+    return [-C * c / 2, C * c / 2, -R * c / 2, R * c / 2]
+
+
 def load_site(folder):
     site = json.load(open(os.path.join(folder, 'site.json')))
     if site.get('status') != 'complete':
         sys.exit(f"site.json status is {site.get('status')!r}, expected 'complete'")
     dem = json.load(open(os.path.join(folder, 'dem.json')))
-    n, c = dem['rows'], dem['cell_size_ft']
-    E = np.array(dem['elevations_ft'], float).reshape(n, n)
+    R, C, c = dem['rows'], dem.get('cols', dem['rows']), dem['cell_size_ft']
+    E = np.array(dem['elevations_ft'], float).reshape(R, C)
     roads = None
     p = os.path.join(folder, 'roads.json')
     if os.path.exists(p):
         r = json.load(open(p))
         roads = r.get('roads', []) if isinstance(r, dict) else r
-    return site, E, c, roads
+    return site, E, c, roads, dem_bounds(dem)
 
 
 class Terrain:
-    def __init__(self, E, cell):
-        self.E, self.c, self.n = E, cell, E.shape[0]
+    """Bilinear bare-earth height (relative to PAD) anywhere in the DEM; clamps at its edge."""
+    def __init__(self, E, cell, bounds=None):
+        self.E, self.c = E, cell
+        self.R, self.C = E.shape
+        self.n = self.R
+        self.b = bounds or [-self.C * cell / 2, self.C * cell / 2, -self.R * cell / 2, self.R * cell / 2]
         self.pad = 0.0
         self.pad = float(self(0.0, 0.0))
 
     def __call__(self, x, z):
         x = np.asarray(x, float); z = np.asarray(z, float)
-        fx = np.clip(x / self.c + self.n / 2 - .5, 0, self.n - 1.001)
-        fz = np.clip(z / self.c + self.n / 2 - .5, 0, self.n - 1.001)
+        fx = np.clip((x - self.b[0]) / self.c - .5, 0, self.C - 1.001)
+        fz = np.clip((z - self.b[2]) / self.c - .5, 0, self.R - 1.001)
         j = np.floor(fx).astype(int); i = np.floor(fz).astype(int); u = fx - j; v = fz - i
         E = self.E
         h = E[i, j] * (1 - u) * (1 - v) + E[i, j + 1] * u * (1 - v) + E[i + 1, j] * (1 - u) * v + E[i + 1, j + 1] * u * v
@@ -56,7 +72,7 @@ def dataset_year(name):
     return 2000 + int(m.group(1)) if m else 0
 
 
-def load_lidar(folder, site, terrain, radius=330):
+def load_lidar(folder, site, terrain, bounds=None):
     import laspy
     cx, cy = site['mercator_center']; k = math.cos(math.radians(site['lat'])) * FT
     man = json.load(open(os.path.join(folder, 'lidar', 'manifest.json')))
@@ -68,7 +84,8 @@ def load_lidar(folder, site, terrain, radius=330):
         for f in tiles:
             l = laspy.read(f)
             x = (np.asarray(l.x) - cx) * k; z = -(np.asarray(l.y) - cy) * k
-            m = (np.abs(x) < radius) & (np.abs(z) < radius)
+            b = bounds or terrain.b
+            m = (x >= b[0]) & (x <= b[1]) & (z >= b[2]) & (z <= b[3])
             if m.any():
                 rows.append(np.c_[x[m], np.asarray(l.z)[m], z[m], np.asarray(l.classification)[m],
                                   np.asarray(l.number_of_returns)[m], np.asarray(l.intensity)[m]])
@@ -302,36 +319,12 @@ def _local_planes(hgt, mask, GX, GZ, win=5):
     return a, b, c, np.sqrt(np.clip(res, 0, None)), ok
 
 
-def roofgrid(c, terr, cell=2.0, zone=None):
-    """Any building that is not a simple house: segment the roof into planes by region growing on a
-    height raster aligned with the building's main axis, and return the labelled grid. The page builds
-    one continuous roof surface from it (each cell on its plane), with walls on the outline and at height
-    steps, so ridges are sharp and there are no cracks. zone(x, z) -> bool clips very large buildings."""
+def segment_heights(hgt, mask, GX, GZ):
+    """Split a roof height raster into planes by region growing (seeded at the flattest cells). Returns
+    (label raster with 1-based plane ids, 0 outside mask; list of [a, b, c] with y = a*u + b*v + c)."""
     from scipy import ndimage
-    from skimage import measure, morphology
     from collections import deque
-    Pw = c['P']
-    if zone is not None:
-        keep = zone(Pw[:, 0], Pw[:, 2])
-        if keep.sum() >= 30: Pw = Pw[keep]
-    # raster aligned with the building's main axis, so walls come out straight and corners square
-    ang = c['rect']['ang']; ca, sa = math.cos(ang), math.sin(ang)
-    P = np.c_[Pw[:, 0] * ca + Pw[:, 2] * sa, Pw[:, 1], -Pw[:, 0] * sa + Pw[:, 2] * ca]
-    x0, z0 = float(P[:, 0].min()) - 2 * cell, float(P[:, 2].min()) - 2 * cell
-    j = ((P[:, 0] - x0) / cell).astype(int); i = ((P[:, 2] - z0) / cell).astype(int)
-    shape = (i.max() + 3, j.max() + 3)
-    occ = np.zeros(shape, bool); occ[i, j] = True
-    mask = ndimage.binary_closing(occ, iterations=1) | occ
-    mask = morphology.remove_small_holes(mask, max_size=60)
-    mask = morphology.remove_small_objects(mask, max_size=24)
-    sums = np.zeros(shape); cnt = np.zeros(shape)
-    np.add.at(sums, (i, j), P[:, 1]); np.add.at(cnt, (i, j), 1)
-    hgt = np.where(cnt > 0, sums / np.maximum(cnt, 1), np.nan)
-    idx = ndimage.distance_transform_edt(np.isnan(hgt), return_distances=False, return_indices=True)
-    hgt = hgt[tuple(idx)]
-    hgt = np.where(mask, ndimage.median_filter(hgt, size=3), hgt)
-    gx = x0 + (np.arange(shape[1]) + .5) * cell; gz = z0 + (np.arange(shape[0]) + .5) * cell
-    GX, GZ = np.meshgrid(gx, gz)
+    shape = hgt.shape
     la, lb, lc, lres, lok = _local_planes(hgt, mask, GX, GZ)
     label = np.zeros(shape, int); planes = []
     order = np.argsort(np.where(mask & lok, lres, 1e9), axis=None)
@@ -392,6 +385,40 @@ def roofgrid(c, terr, cell=2.0, zone=None):
             best = min(cand, key=fit)
             if fit(best) < 3.0 or n < 8: label[R] = best; changed = True
         if not changed: break
+    return label, planes
+
+
+def roofgrid(c, terr, cell=2.0, zone=None):
+    """Any building that is not a simple house: segment the roof into planes by region growing on a
+    height raster aligned with the building's main axis, and return the labelled grid. The page builds
+    one continuous roof surface from it (each cell on its plane), with walls on the outline and at height
+    steps, so ridges are sharp and there are no cracks. zone(x, z) -> bool clips very large buildings."""
+    from scipy import ndimage
+    from skimage import measure, morphology
+    from collections import deque
+    Pw = c['P']
+    if zone is not None:
+        keep = zone(Pw[:, 0], Pw[:, 2])
+        if keep.sum() >= 30: Pw = Pw[keep]
+    # raster aligned with the building's main axis, so walls come out straight and corners square
+    ang = c['rect']['ang']; ca, sa = math.cos(ang), math.sin(ang)
+    P = np.c_[Pw[:, 0] * ca + Pw[:, 2] * sa, Pw[:, 1], -Pw[:, 0] * sa + Pw[:, 2] * ca]
+    x0, z0 = float(P[:, 0].min()) - 2 * cell, float(P[:, 2].min()) - 2 * cell
+    j = ((P[:, 0] - x0) / cell).astype(int); i = ((P[:, 2] - z0) / cell).astype(int)
+    shape = (i.max() + 3, j.max() + 3)
+    occ = np.zeros(shape, bool); occ[i, j] = True
+    mask = ndimage.binary_closing(occ, iterations=1) | occ
+    mask = morphology.remove_small_holes(mask, max_size=60)
+    mask = morphology.remove_small_objects(mask, max_size=24)
+    sums = np.zeros(shape); cnt = np.zeros(shape)
+    np.add.at(sums, (i, j), P[:, 1]); np.add.at(cnt, (i, j), 1)
+    hgt = np.where(cnt > 0, sums / np.maximum(cnt, 1), np.nan)
+    idx = ndimage.distance_transform_edt(np.isnan(hgt), return_distances=False, return_indices=True)
+    hgt = hgt[tuple(idx)]
+    hgt = np.where(mask, ndimage.median_filter(hgt, size=3), hgt)
+    gx = x0 + (np.arange(shape[1]) + .5) * cell; gz = z0 + (np.arange(shape[0]) + .5) * cell
+    GX, GZ = np.meshgrid(gx, gz)
+    label, planes = segment_heights(hgt, mask, GX, GZ)
     # upsample x2 with a smoothed outline, so angled walls step in 1 ft, not 2-2.5 ft
     f_ = 2
     lab_up = np.kron(label, np.ones((f_, f_), int))
@@ -432,67 +459,63 @@ def roofgrid(c, terr, cell=2.0, zone=None):
                           planes=[[round(a_, 5), round(b_, 5), round(c_, 3)] for a_, b_, c_ in planes]))
 
 
-def pavement(prim, extent, n=240):
-    """Paved ground (asphalt) from LiDAR return intensity: asphalt is dark at 1064 nm, grass is bright.
-    Returns a run-length-encoded n x n mask over the terrain square, rows north to south."""
+def pavement(prim, G):
+    """Last-resort paving estimate from LiDAR return intensity, used only when no mapped roads or surfaces
+    exist. Raw intensity is uncalibrated (range, angle and sensor all change it), so the page labels this
+    an estimate. Returns a run-length-encoded mask on the site grid G."""
     from scipy import ndimage
     from skimage import filters, morphology
     g = prim['cls'] == 2
     if g.sum() < 500: return None
-    x, z, it = prim['x'][g], prim['z'][g], prim['inten'][g].astype(float)
-    cell = extent / n
-    j = np.floor(x / cell + n / 2).astype(int); i = np.floor(z / cell + n / 2).astype(int)
-    ok = (i >= 0) & (j >= 0) & (i < n) & (j < n)
-    s_ = np.zeros((n, n)); c_ = np.zeros((n, n))
+    i, j, ok = G.ij(prim['x'][g], prim['z'][g]); it = prim['inten'][g].astype(float)
+    s_ = np.zeros((G.R, G.C)); c_ = np.zeros((G.R, G.C))
     np.add.at(s_, (i[ok], j[ok]), np.log1p(it[ok])); np.add.at(c_, (i[ok], j[ok]), 1)
     has = c_ > 0
     if has.sum() < 200: return None
     v = np.where(has, s_ / np.maximum(c_, 1), np.nan)
     thr = filters.threshold_otsu(v[has])
     lo, hi = np.percentile(v[has], [10, 90])
-    if hi - lo < 0.6: return None                        # no usable intensity contrast
+    if hi - lo < 0.6: return None
     dark = has & (v < thr)
-    # ground seen through tree canopy is shaded and dark too: drop cells under vegetation
     veg = (~np.isin(prim['cls'], [2, 7, 9, 17, 18])) & (prim['nret'] > 1) & (prim['hag'] > 3)
-    vj = np.floor(prim['x'][veg] / cell + n / 2).astype(int); vi = np.floor(prim['z'][veg] / cell + n / 2).astype(int)
-    vk = (vi >= 0) & (vj >= 0) & (vi < n) & (vj < n)
-    canopy = np.zeros((n, n), bool); canopy[vi[vk], vj[vk]] = True
-    canopy = ndimage.binary_dilation(canopy, iterations=1)
-    dark &= ~canopy
+    vi, vj, vk = G.ij(prim['x'][veg], prim['z'][veg])
+    canopy = np.zeros((G.R, G.C), bool); canopy[vi[vk], vj[vk]] = True
+    dark &= ~ndimage.binary_dilation(canopy, iterations=1)
     dark = ndimage.median_filter(dark.astype(np.uint8), size=3).astype(bool)
     dark = morphology.remove_small_objects(dark, max_size=40)
     dark = morphology.remove_small_holes(dark, max_size=30)
-    rle = []
-    for row in dark:
-        runs = []; k = 0
-        while k < n:
-            if row[k]:
-                s0 = k
-                while k < n and row[k]: k += 1
-                runs += [s0, k - s0]
-            else: k += 1
-        rle.append(runs)
-    return dict(n=n, extent=round(extent, 3), rle=rle, share=round(float(dark.mean()), 3))
+    return dict(G.meta(), rle=rle(dark), share=round(float(dark.mean()), 3))
 
 
 class Grid:
-    """The terrain square as an n x n raster (rows north to south), for the site zone and pavement."""
-    def __init__(self, extent, n=240):
-        self.n, self.extent, self.c = n, extent, extent / n
+    """The DEM rectangle as a raster (rows north to south, columns west to east), for the site zone and
+    pavement. bounds: [xmin, xmax, zmin, zmax] outer edges in the model frame."""
+    def __init__(self, bounds, cell=2.65):
+        self.b = list(bounds)
+        self.C = max(1, int(round((bounds[1] - bounds[0]) / cell))); self.R = max(1, int(round((bounds[3] - bounds[2]) / cell)))
+        self.c = (bounds[1] - bounds[0]) / self.C
+        self.n = self.R
 
     def ij(self, x, z):
-        j = np.floor(np.asarray(x) / self.c + self.n / 2).astype(int); i = np.floor(np.asarray(z) / self.c + self.n / 2).astype(int)
-        return i, j, (i >= 0) & (j >= 0) & (i < self.n) & (j < self.n)
+        j = np.floor((np.asarray(x) - self.b[0]) / self.c).astype(int); i = np.floor((np.asarray(z) - self.b[2]) / self.c).astype(int)
+        return i, j, (i >= 0) & (j >= 0) & (i < self.R) & (j < self.C)
 
     def raster(self, x, z):
-        i, j, ok = self.ij(x, z); M = np.zeros((self.n, self.n), bool); M[i[ok], j[ok]] = True; return M
+        i, j, ok = self.ij(x, z); M = np.zeros((self.R, self.C), bool); M[i[ok], j[ok]] = True; return M
 
     def lookup(self, M, x, z):
         i, j, ok = self.ij(x, z); out = np.zeros(len(np.atleast_1d(x)), bool)
         out[ok] = M[i[ok], j[ok]]; return out
 
     def xz(self, i, j):
-        return (np.asarray(j) + .5 - self.n / 2) * self.c, (np.asarray(i) + .5 - self.n / 2) * self.c
+        return self.b[0] + (np.asarray(j) + .5) * self.c, self.b[2] + (np.asarray(i) + .5) * self.c
+
+    def centers(self):
+        gx, gz = self.xz(np.arange(self.R)[:, None], np.arange(self.C)[None, :])
+        return np.broadcast_to(gx, (self.R, self.C)), np.broadcast_to(gz, (self.R, self.C))
+
+    def meta(self):
+        return dict(rows=self.R, cols=self.C, cell=round(self.c, 5), bounds=[round(v, 3) for v in self.b])
 
 
 def rle(M):
@@ -518,104 +541,206 @@ def house_like(c, hh):
     return (top2 >= 0.5 * tot and 8 <= hh['wall_h'] <= 26 and hh['ridge_h'] <= 42 and max(hh['w'], hh['d']) <= 80)
 
 
+def load_features(folder):
+    """Mapped evidence in the model frame: features.json (schema 1, from pipeline/fetch), else the legacy
+    osm_buildings.json + roads.json. Returns dict(buildings, surfaces, ways, entrances, coverage)."""
+    p = os.path.join(folder, 'features.json')
+    if os.path.exists(p):
+        F = json.load(open(p))
+        if F.get('schema_version') != 1: sys.exit(f"features.json schema {F.get('schema_version')} not supported")
+        return F
+    F = dict(buildings=[], surfaces=[], ways=[], entrances=[], coverage=None)
+    p = os.path.join(folder, 'osm_buildings.json')
+    if os.path.exists(p):
+        d = json.load(open(p)); d = d.get('buildings', []) if isinstance(d, dict) else d
+        for b in d:
+            pts = b.get('points') or b.get('pts') or []
+            if len(pts) >= 4:
+                F['buildings'].append(dict(id=f"osm-w{b.get('id')}", polygon=pts[:-1] if pts[0] == pts[-1] else pts, holes=[],
+                                           tags=b.get('tags') or {}, source='osm', source_id=f"way/{b.get('id')}", source_date=None, confidence=None))
+    p = os.path.join(folder, 'roads.json')
+    if os.path.exists(p):
+        d = json.load(open(p)); d = d.get('roads', []) if isinstance(d, dict) else d
+        for w in d:
+            pts = w.get('points') or w.get('pts') or []
+            if len(pts) >= 2:
+                F['ways'].append(dict(kind=w.get('highway') or 'residential', centerline=pts, width_ft=None, width_source=None,
+                                      name=w.get('name'), source='osm', source_id=f"way/{w.get('id')}"))
+    return F
+
+
+def lidar_outlines(G, x, z, H, NR, C, min_ft2=350):
+    """Footprints where no map has them: connected single-return roof cells, contoured and simplified, so
+    walls run straight instead of stepping cell by cell."""
+    from scipy import ndimage
+    from skimage import measure, morphology
+    from shapely.geometry import Polygon
+    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (NR <= 1)
+    # roofs are locally planar, tree crowns are not (some surveys leave both unclassified): keep cells whose
+    # 5 x 5 neighbourhood fits a plane within 0.7 ft
+    i, j, ok = G.ij(x[m], z[m]); y = H[m] + 0.0
+    sm = np.zeros((G.R, G.C)); sc = np.zeros((G.R, G.C))
+    np.add.at(sm, (i[ok], j[ok]), y[ok]); np.add.at(sc, (i[ok], j[ok]), 1)
+    occ = sc > 0
+    hg = np.where(occ, sm / np.maximum(sc, 1), np.nan)
+    GX, GZ = G.centers()
+    _a, _b, _c, res, lok = _local_planes(np.nan_to_num(hg), occ, np.asarray(GX), np.asarray(GZ))
+    M = occ & lok & (res < 0.7)
+    M = ndimage.binary_dilation(M, iterations=2) & occ      # the fit window trims roof edges: grow them back
+    # close only 1-cell gaps (about 2.6 ft): houses 8-15 ft apart must stay separate buildings
+    M = ndimage.binary_closing(M, iterations=1) | M
+    M = ndimage.binary_opening(ndimage.binary_fill_holes(M), iterations=1)
+    M = morphology.remove_small_objects(M, max_size=int(min_ft2 / G.c ** 2))
+    L, n = ndimage.label(M)
+    out = []
+    for k in range(1, n + 1):
+        cs = measure.find_contours(np.pad(L == k, 1).astype(float), 0.5)
+        if not cs: continue
+        cnt = measure.approximate_polygon(max(cs, key=len), tolerance=1.0 / G.c)
+        px, pz = G.xz(cnt[:, 0] - 1, cnt[:, 1] - 1)
+        pg = Polygon(np.c_[px, pz]).buffer(0)
+        if pg.area >= min_ft2: out.append(pg.simplify(1.2))
+    return out
+
+
 def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     """Site rule: the building under the address point, plus every building and ground feature that
     touches the zone within buffer_ft of its footprint. Touching buildings are kept whole up to
-    whole_max_ft2 of roof, larger ones are clipped to the zone."""
+    whole_max_ft2, larger ones are cut at the zone with a section face. Outlines come from mapped
+    footprints (features.json) where they exist and LiDAR supports them, else from LiDAR; heights and
+    roof planes are always measured from LiDAR."""
     from scipy import ndimage
-    site, E, cell, roads = load_site(folder)
-    terr = Terrain(E, cell)
-    D = load_lidar(folder, site, terr)
+    import shapely
+    from shapely.geometry import Polygon, Point, LineString, box as sbox
+    from shapely.ops import unary_union
+    import geometry as GEO
+    site, E, cell, _roads, bounds = load_site(folder)
+    terr = Terrain(E, cell, bounds)
+    D = load_lidar(folder, site, terr, bounds)
     prim = D[0]
-    extent = E.shape[0] * cell; G = Grid(extent); half = extent / 2 - 3
+    G = Grid(bounds)
+    F = load_features(folder)
     X = np.concatenate([d['x'] for d in D]); Y = np.concatenate([d['y'] for d in D]); Z = np.concatenate([d['z'] for d in D])
     C = np.concatenate([d['cls'] for d in D]); H = np.concatenate([d['hag'] for d in D])
     NR = np.concatenate([d['nret'] for d in D])
     S = np.concatenate([np.full(d['n'], i) for i, d in enumerate(D)])
-    pave = pavement(prim, extent)
-    # roofs return one echo; tree canopy returns several. Keep single returns for building detection.
-    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (np.abs(X) < half) & (np.abs(Z) < half) & (NR <= 1)
-    x, y, z = X[m], Y[m], Z[m]
-    lab, n = clusters(x, z, cell=3.0, dilate=0)
-    polys = road_polylines(roads)
-    cands = []
-    for k in range(1, n + 1):
-        I = np.where(lab == k)[0]
-        if len(I) < 60: continue
-        P = np.c_[x[I], y[I], z[I]]
-        planes = ransac_planes(P)
-        roof = [(cf, J) for cf, J in planes if plane_info(cf)['pitch'] < 55]
-        nroof = sum(len(J) for _, J in roof)
-        if not roof or nroof < 50: continue
-        J = np.concatenate([J for _, J in roof])
-        R = min_rect(P[J, 0], P[J, 2])
-        frac = nroof / len(I); big = max(len(J) for _, J in roof)
-        if R['area'] < 350 or big < 35: continue            # trees: many small noisy planes
-        if frac < 0.35 and big / len(I) < 0.2: continue
-        cands.append(dict(I=I, P=P, planes=planes, rect=R, n=len(I), d0=float(np.hypot(P[:, 0], P[:, 2]).min())))
-    if not cands: sys.exit('no buildings found in the LiDAR near this address')
-    feat = min(cands, key=lambda c: c['d0'])
-    if feat['d0'] > 120:
-        sys.exit(f'no building within 120 ft of the address point (nearest roof is {feat["d0"]:.0f} ft away); '
-                 'the geocode may be off, or the LiDAR predates the building')
-    # footprints on the site grid
-    def footprint(c):
-        M = G.raster(c['P'][:, 0], c['P'][:, 2])
-        M = ndimage.binary_closing(M, iterations=2) | M
-        return ndimage.binary_fill_holes(M)
-    for c in cands: c['fp'] = footprint(c); c['area'] = float(c['fp'].sum() * G.c ** 2)
-    zone = ndimage.distance_transform_edt(~feat['fp']) * G.c <= buffer_ft
-    inc = [c for c in cands if (c['fp'] & zone).any()]
-    # where is the street? OSM centreline if we have it, else the nearest LiDAR pavement
-    pave_mask = None
-    if pave:
-        pave_mask = np.zeros((pave['n'], pave['n']), bool)
-        for i_, runs in enumerate(pave['rle']):
-            for k in range(0, len(runs), 2): pave_mask[i_, runs[k]:runs[k] + runs[k + 1]] = True
-        big_p = morphology_label_keep_large(pave_mask, G, min_ft2=1500)
-        pidx = ndimage.distance_transform_edt(~big_p, return_distances=False, return_indices=True) if big_p.any() else None
-    def street_dir(pt):
-        if polys:
-            q = nearest_road(np.array(pt), polys)
-            if q: return (q[1] - pt) / (np.hypot(*(q[1] - pt)) or 1), q[3].get('name') if q[3] else None
-        if pave_mask is not None and pidx is not None:
-            i, j, ok = G.ij([pt[0]], [pt[1]])
-            if ok[0]:
-                pi, pj = pidx[0][i[0], j[0]], pidx[1][i[0], j[0]]
-                qx, qz = G.xz(pi, pj); v = np.array([qx - pt[0], qz - pt[1]])
-                if np.hypot(*v) > 1: return v / np.hypot(*v), None
-        return np.array([0.0, 1.0]), None
-    fpt = np.array([feat['rect']['cx'], feat['rect']['cz']])
-    front, street_name = street_dir(fpt)
-    blds = []
-    for c in inc:
-        is_feat = c is feat
-        clip = (not is_feat) and c['area'] > whole_max_ft2
-        cpt = np.array([c['rect']['cx'], c['rect']['cz']])
+    # where LiDAR and DEM both exist (features.json may report narrower LiDAR bounds)
+    cov = F.get('coverage') or {}
+    lb = cov.get('lidar_bounds_ft') or bounds
+    dbox = sbox(max(bounds[0], lb[0]) + 2, max(bounds[2], lb[2]) + 2, min(bounds[1], lb[1]) - 2, min(bounds[3], lb[3]) - 2)
+    nonb = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260)
+    # ---- footprints: mapped polygons with LiDAR support, else LiDAR outlines
+    def mkpoly(b):
+        try:
+            pg = Polygon(b['polygon'], [h for h in (b.get('holes') or []) if len(h) >= 3]).buffer(0)
+        except Exception: return None
+        return pg if pg.area > 60 else None
+    mapped = []
+    for b in F.get('buildings', []):
+        pg = mkpoly(b)
+        if pg is not None and pg.intersects(dbox): mapped.append(dict(poly=pg, rec=b))
+    single = nonb & (NR <= 1)
+    roofpts = single
+    def support(pg):
+        """Share of the footprint whose cells have roof-like returns (single echo, > 6 ft above ground)."""
+        Mf = G.raster(*_poly_cells(pg, G))
+        Mr = G.raster(X[roofpts], Z[roofpts])
+        n = Mf.sum()
+        return float((Mf & ndimage.binary_dilation(Mr)).sum() / n) if n else 0.0
+    for m in mapped: m['support'] = support(m['poly'])
+    blds_src = [dict(poly=m['poly'], rec=m['rec'], support=m['support'], outline='mapped') for m in mapped]
+    # LiDAR buildings no map covers (new construction, unmapped areas)
+    mapped_union = unary_union([m['poly'].buffer(3) for m in mapped]) if mapped else None
+    for pg in lidar_outlines(G, X, Z, H, NR, C):
+        if mapped_union is not None and pg.intersection(mapped_union).area > 0.4 * pg.area: continue
+        blds_src.append(dict(poly=pg, rec=None, support=1.0, outline='measured'))
+    if not blds_src: sys.exit('no buildings found near this address (map or LiDAR)')
+    # ---- the featured building: the footprint under the address point, else the nearest with support
+    o = Point(0, 0)
+    inside = [b for b in blds_src if b['poly'].buffer(1.5).contains(o)]
+    if inside: feat = min(inside, key=lambda b: b['poly'].area)
+    else:
+        cand = [b for b in blds_src if b['support'] >= 0.25]
+        feat = min(cand or blds_src, key=lambda b: b['poly'].distance(o))
+        if feat['poly'].distance(o) > 120:
+            sys.exit(f"no building within 120 ft of the address point (nearest is {feat['poly'].distance(o):.0f} ft away)")
+    zone = feat['poly'].buffer(buffer_ft, quad_segs=16)
+    inc = [b for b in blds_src if b['poly'].intersects(zone) and (b is feat or b['support'] >= 0.25 or b['outline'] == 'mapped')]
+    # ---- roads for street direction and street-facing doors
+    VEH = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service',
+           'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'}
+    rx = []
+    for w in F.get('ways', []):
+        if w['kind'] in VEH and w.get('service') not in ('driveway', 'parking_aisle'):
+            ls = LineString(w['centerline'])
+            rx += [ls.interpolate(t).coords[0] for t in np.arange(0, ls.length, 6.0)]
+    roads_xy = np.array(rx) if rx else None
+    def front_of(pg):
+        c_ = pg.centroid
+        if roads_xy is not None:
+            d = np.hypot(roads_xy[:, 0] - c_.x, roads_xy[:, 1] - c_.y); k = int(np.argmin(d))
+            v = roads_xy[k] - [c_.x, c_.y]; n = np.hypot(*v)
+            if n > 1: return v / n
+        return np.array([0.0, 1.0])
+    street_name = None
+    if roads_xy is not None:
+        best = None
+        for w in F.get('ways', []):
+            if w['kind'] in VEH and w.get('name'):
+                d = LineString(w['centerline']).distance(feat['poly'])
+                if best is None or d < best[0]: best = (d, w['name'])
+        street_name = best[1] if best else None
+    nodes = F.get('entrances', [])
+    # ---- build every included building
+    blds, edge_touch, cut_ids = [], [], []
+    xs_all, zs_all = X[nonb], Z[nonb]
+    for k, b in enumerate(sorted(inc, key=lambda b: b is not feat)):
+        is_feat = b is feat
+        bid = 'featured' if is_feat else f'b{len(blds) - 1 if blds else 0}'
+        pg0 = b['poly']; pg = pg0; cut_lines = []
+        if not is_feat and pg0.area > whole_max_ft2:
+            pg = pg0.intersection(zone); cut_ids.append(bid)
+        if not pg.within(dbox):
+            pg = pg.intersection(dbox); edge_touch.append(bid)
+        pg = max(GEO.as_polys(pg), key=lambda p: p.area, default=None)
+        if pg is None or pg.area < 60: continue
+        cut = pg.boundary.difference(pg0.boundary.buffer(0.3))
+        if not cut.is_empty: cut_lines.append(cut)
+        tags = (b['rec'] or {}).get('tags') or {}
+        # points over this footprint (a little wider for eaves)
+        bx0, bz0, bx1, bz1 = pg.buffer(3.5).bounds
+        sel = (xs_all > bx0) & (xs_all < bx1) & (zs_all > bz0) & (zs_all < bz1)
+        Ii = np.where(nonb)[0][sel]
+        inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
+        Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
         hh = None
-        if not clip and c['area'] <= 3500:
-            fv, _ = street_dir(cpt)
-            res = measure_building(c['P'], c['planes'], terr, fv)
-            hh = res[0] if res else None
-            if not house_like(c, hh): hh = None
+        if pg.area <= 3500 and b['support'] >= 0.5 and not cut_lines:
+            sP = Pp[Pp[:, 3] <= 1][:, :3]
+            if len(sP) >= 60:
+                planes = ransac_planes(sP)
+                c_ = dict(P=sP, planes=planes, rect=min_rect(sP[:, 0], sP[:, 2]))
+                res = measure_building(sP, planes, terr, front_of(pg))
+                hh = res[0] if res else None
+                if not house_like(c_, hh): hh = None
+                if hh: hh['outline_poly'] = [[round(x_, 2), round(z_, 2)] for x_, z_ in pg.exterior.coords[:-1]]
         if hh is None:
-            zf = (lambda xx, zz: G.lookup(zone, xx, zz)) if clip else None
-            hh = roofgrid(c, terr, cell=2.0 if c['area'] < 12000 else 2.5, zone=zf)
-            hh['clipped'] = bool(clip)
-        hh.update(id='featured' if is_feat else f'b{len(blds)}', role='featured' if is_feat else 'context')
+            hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO)
+        hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
+                  provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
+                                  outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))
+        if tags.get('name'): hh['name'] = tags['name']
+        if tags.get('addr:housenumber'): hh['number'] = tags['addr:housenumber']; hh['street'] = tags.get('addr:street')
+        hh['use'] = tags.get('building')
         blds.append(hh)
-    blds.sort(key=lambda h: h['role'] != 'featured')
-    # final site = zone plus the whole footprints of included buildings (with a little yard)
-    site_m = zone.copy()
-    for c in inc:
-        if c['area'] <= whole_max_ft2 or c is feat: site_m |= c['fp']
-    site_m = ndimage.binary_dilation(site_m, iterations=2)
-    site_m = ndimage.binary_fill_holes(ndimage.binary_closing(site_m, iterations=3))
-    # trees: canopy peaks (primary dataset) inside the site, not on included roofs
-    roofs = np.zeros_like(site_m)
-    for c in inc: roofs |= ndimage.binary_dilation(c['fp'], iterations=2)
+    # ---- site = zone + whole footprints of the included buildings (with a little yard)
+    gx, gz = G.centers()
+    site_poly = unary_union([zone] + [b['poly'] for b in inc if b['poly'].area <= whole_max_ft2 or b is feat]).intersection(dbox.buffer(2))
+    site_m = shapely.contains_xy(site_poly.buffer(4), gx, gz)
+    # ---- trees: canopy peaks inside the site, not over any footprint
+    allfp = unary_union([b['poly'].buffer(2.5) for b in blds_src])
     tm = (S == 0) & (~np.isin(C, list(NONBUILD))) & (H > 12) & (H < 140) & (NR > 1)
-    tm &= G.lookup(site_m, X, Z) & ~G.lookup(roofs, X, Z)
+    tm &= G.lookup(site_m, X, Z)
+    if tm.any(): tm[tm] &= ~shapely.contains_xy(allfp, X[tm], Z[tm])
     trees = []
     if tm.any():
         tx, tz, th = X[tm], Z[tm], H[tm]
@@ -629,34 +754,203 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
             if cnt < 3: continue
             if any((xx - t['x']) ** 2 + (zz - t['z']) ** 2 < 14 ** 2 for t in trees): continue
             trees.append(dict(x=round(float(xx), 1), z=round(float(zz), 1), h=round(float(min(hh_, 120)), 1)))
-            if len(trees) >= 500: break
-    # featured outline (for the yellow line on the ground)
-    from skimage import measure
-    outline = []
-    fo = np.pad(ndimage.binary_dilation(feat['fp'], iterations=2), 1).astype(float)
-    cs = measure.find_contours(fo, 0.5)
-    if cs:
-        cnt = measure.approximate_polygon(max(cs, key=len), tolerance=0.8)
-        ox, oz = G.xz(cnt[:, 0] - 1 - .5 + .5, cnt[:, 1] - 1 - .5 + .5)
-        outline = [[round(float(a_), 1), round(float(b_), 1)] for a_, b_ in zip(ox, oz)]
-    scene = dict(schema_version=2, address=site['address'], matched_address=site.get('matched_address'),
+            if len(trees) >= 600: break
+    has_map_ground = bool(F.get('ways') or F.get('surfaces'))
+    pave = None if has_map_ground else pavement(prim, G)
+    fp = feat['poly']
+    outline = [[round(x_, 1), round(z_, 1)] for x_, z_ in fp.exterior.coords[:-1]]
+    status = 'incomplete' if edge_touch else (cov.get('status') or 'complete')
+    coverage = dict(status=status, edge_touching=edge_touch, section_cuts=cut_ids, data_bounds_ft=[round(v, 1) for v in dbox.bounds],
+                    source_status=cov.get('status'))
+    if edge_touch:
+        want = unary_union([zone] + [b['poly'] for b in inc if b['poly'].area <= whole_max_ft2 or b is feat]).buffer(30).bounds
+        coverage['wanted_bounds_ft'] = [round(want[0], 1), round(want[2], 1), round(want[1], 1), round(want[3], 1)]
+    front = front_of(fp)
+    scene = dict(schema_version=3, address=site['address'], matched_address=site.get('matched_address'),
                  lat=site['lat'], lon=site['lon'], pad_ft=round(terr.pad, 2), buffer_ft=buffer_ft,
+                 dem_bounds_ft=bounds, coverage=coverage,
                  datasets=[dict(name=d['name'], year=d['year'], points=int(d['n']), z_offset_ft=round(d['offset_ft'], 2),
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
-                             source='osm' if polys else ('pavement' if pave else 'none')),
-                 site=dict(n=G.n, extent=round(extent, 3), rle=rle(site_m)),
-                 outline=outline, houses=blds, trees=trees, pavement=pave, candidates=len(cands))
+                             source='mapped' if roads_xy is not None else ('lidar-intensity' if pave else 'none')),
+                 site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=pave,
+                 candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
     json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), separators=(',', ':'))
     if verbose:
         for hh in blds:
-            r = hh['roof']
-            desc = (f"grid {r['planes']} planes, pitch {r['pitch_deg']}, {hh['area_ft2']} ft2{' clipped' if hh.get('clipped') else ''}"
-                    if r['type'] == 'grid' else f"{r['type']} pitch {r.get('pitch_deg')} cross {len(r.get('cross', []))}")
-            print(f"{hh['id']:9s} ({hh['x']:7.1f},{hh['z']:7.1f}) {hh['w']}x{hh['d']}  eave {hh['wall_h']}  top {hh['ridge_h']}  {desc}")
+            r = hh['roof']; pv = hh.get('provenance', {})
+            print(f"{hh['id']:9s} {(hh.get('name') or hh.get('use') or '')[:28]:28s} ({hh['x']:7.1f},{hh['z']:7.1f}) eave {hh['wall_h']:5.1f} top {hh['ridge_h']:5.1f} "
+                  f"{r['type']:5s} outline {pv.get('outline')} support {pv.get('lidar_support')} doors {len(hh.get('doors', []))} windows {len(hh.get('windows', []))}"
+                  f"{' CLIPPED' if hh.get('clipped') else ''}")
         print(f"buildings {len(blds)}, trees {len(trees)}, street {scene['street']['source']} {street_name or ''}, "
-              f"site {site_m.mean() * extent ** 2:.0f} ft2, pavement {pave['share'] if pave else 'none'}")
+              f"footprints {scene['footprints']}, coverage {status} {edge_touch or ''}")
     return scene
+
+
+def _poly_cells(pg, G):
+    """Centres of site-grid cells inside a polygon (for rasterizing footprints)."""
+    import shapely
+    x0, z0, x1, z1 = pg.bounds
+    i0, j0, _ = G.ij([x0], [z0]); i1, j1, _ = G.ij([x1], [z1])
+    ii = np.arange(max(0, i0[0]), min(G.R, i1[0] + 1)); jj = np.arange(max(0, j0[0]), min(G.C, j1[0] + 1))
+    if not len(ii) or not len(jj): return np.array([]), np.array([])
+    gx, gz = G.xz(ii[:, None], jj[None, :]); gx, gz = np.broadcast_arrays(gx, gz)
+    m = shapely.contains_xy(pg, gx, gz)
+    return gx[m], gz[m]
+
+
+def merge_coplanar(label, planes, hgt, mask, GU, GV, max_deg=8.0, max_med=0.6):
+    """Region growing over-segments roofs (noise splits one plane into several). Merge planes whose normals
+    are within max_deg of each other when one plane fits both regions (median residual under max_med ft).
+    label: 0-based, all cells assigned. Returns relabelled (compact) label and planes."""
+    P = [list(p) for p in planes]
+    alive = list(range(len(P)))
+    def normal(p): n = np.array([-p[0], -p[1], 1.0]); return n / np.linalg.norm(n)
+    changed = True
+    while changed:
+        changed = False
+        sizes = {k: int(((label == k) & mask).sum()) for k in alive}
+        for a in sorted(alive, key=lambda k: -sizes[k]):
+            if a not in alive: continue
+            for b in sorted(alive, key=lambda k: -sizes[k]):
+                if b == a or b not in alive: continue
+                if math.degrees(math.acos(min(1.0, float(normal(P[a]) @ normal(P[b]))))) > max_deg: continue
+                R = ((label == a) | (label == b)) & mask
+                if R.sum() < 3: continue
+                A = np.c_[GU[R], GV[R], np.ones(R.sum())]
+                fit = np.linalg.lstsq(A, hgt[R], rcond=None)[0]
+                if np.median(np.abs(A @ fit - hgt[R])) > max_med: continue
+                P[a] = [float(v) for v in fit]; label[label == b] = a; alive.remove(b); changed = True
+    remap = {k: i for i, k in enumerate(alive)}
+    return np.vectorize(remap.get)(label), [P[k] for k in alive]
+
+
+def absorb_fragments(L, min_cells):
+    """Pieces of a plane smaller than min_cells join the neighbouring plane they share the longest edge with."""
+    from scipy import ndimage
+    L = L.copy()
+    for _ in range(3):
+        changed = False
+        for k in np.unique(L):
+            comp, n = ndimage.label(L == k)
+            if n == 0: continue
+            sizes = ndimage.sum(np.ones_like(L), comp, range(1, n + 1))
+            for ci, sz in enumerate(sizes, 1):
+                if sz >= min_cells: continue
+                R = comp == ci
+                ring = ndimage.binary_dilation(R) & ~R
+                nb = L[ring]; nb = nb[nb != k]
+                if len(nb): L[R] = np.bincount(nb).argmax(); changed = True
+        if not changed: break
+    return L
+
+
+def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO):
+    """Any building that is not a simple house: roof planes measured from LiDAR inside the footprint,
+    meshed exactly to the footprint, with walls on the outline, doors and windows."""
+    from scipy import ndimage
+    import shapely
+    mrr = pg.minimum_rotated_rectangle; co = list(mrr.exterior.coords)
+    e1 = (co[1][0] - co[0][0], co[1][1] - co[0][1]); e2 = (co[2][0] - co[1][0], co[2][1] - co[1][1])
+    ex = e1 if math.hypot(*e1) >= math.hypot(*e2) else e2
+    ang = math.atan2(ex[1], ex[0])
+    ca, sa = math.cos(ang), math.sin(ang)
+    area = pg.area
+    cell = 2.0 if area < 12000 else (2.5 if area < 60000 else 3.0)
+    puv = shapely.transform(pg, lambda c: np.c_[c[:, 0] * ca + c[:, 1] * sa, -c[:, 0] * sa + c[:, 1] * ca])
+    u0, v0, u1, v1 = puv.bounds; u0 -= cell; v0 -= cell
+    Cn = int(math.ceil((u1 + cell - u0) / cell)); Rn = int(math.ceil((v1 + cell - v0) / cell))
+    gu = u0 + (np.arange(Cn) + .5) * cell; gv = v0 + (np.arange(Rn) + .5) * cell
+    GU, GV = np.meshgrid(gu, gv)
+    mask = shapely.contains_xy(puv.buffer(cell * 0.75), GU, GV)
+    support = b['support']
+    hgt = np.full((Rn, Cn), np.nan)
+    if len(Pp):
+        pu = Pp[:, 0] * ca + Pp[:, 2] * sa; pv = -Pp[:, 0] * sa + Pp[:, 2] * ca
+        j = np.clip(((pu - u0) / cell).astype(int), 0, Cn - 1); i = np.clip(((pv - v0) / cell).astype(int), 0, Rn - 1)
+        sg = Pp[:, 3] <= 1
+        sm = np.zeros((Rn, Cn)); sc = np.zeros((Rn, Cn))
+        np.add.at(sm, (i[sg], j[sg]), Pp[sg, 1]); np.add.at(sc, (i[sg], j[sg]), 1)
+        hgt = np.where(sc > 0, sm / np.maximum(sc, 1), np.nan)
+        # cells with only multi-echo returns (roof edges under branches): the lower quartile, so canopy above
+        # the roof does not lift it; cells whose value sits far off every neighbour are dropped later by the
+        # median filter and plane fit
+        mi = ~sg
+        if mi.any():
+            order = np.lexsort((Pp[mi, 1], i[mi] * Cn + j[mi]))
+            ii, jj, yy = i[mi][order], j[mi][order], Pp[mi, 1][order]
+            key = ii * Cn + jj
+            starts = np.r_[0, np.nonzero(np.diff(key))[0] + 1]; ends = np.r_[starts[1:], len(key)]
+            for s0, e0 in zip(starts, ends):
+                r_, c_ = ii[s0], jj[s0]
+                if np.isnan(hgt[r_, c_]): hgt[r_, c_] = yy[s0 + (e0 - s0) // 4]
+    have = ~np.isnan(hgt) & mask
+    grade = float(np.median(terr(*np.array(pg.exterior.coords).T)))
+    heights_src = 'measured'
+    if support < 0.25 or have.sum() < 12:
+        # mapped footprint without LiDAR support: height from tags, else one generic storey count
+        try: ht = float(str(tags.get('height', '')).split()[0]) * 3.28084
+        except ValueError: ht = None
+        lv = tags.get('building:levels')
+        try: lv = float(lv)
+        except (TypeError, ValueError): lv = None
+        top = ht or (lv * 12 if lv else 14.0); heights_src = 'mapped' if (ht or lv) else 'default'
+        hgt = np.full((Rn, Cn), grade + top)
+    else:
+        idx = ndimage.distance_transform_edt(~have, return_distances=False, return_indices=True)
+        hgt = hgt[tuple(idx)]
+        hgt = np.where(mask, ndimage.median_filter(hgt, size=3), hgt)
+    from analyze_site import segment_heights  # noqa (same module when run as a script)
+    label, planes = segment_heights(hgt, mask, GU, GV)
+    if (label == 0).any():
+        idx = ndimage.distance_transform_edt(label == 0, return_distances=False, return_indices=True)
+        label = label[tuple(idx)]
+    label = label - 1
+    label, planes = merge_coplanar(label, planes, hgt, mask, GU, GV)
+    # Plane boundaries from region growing sit a coarse cell or two off the true ridge, hip, valley and
+    # step lines. On a finer raster, each cell takes the plane (among those of nearby coarse cells) closest
+    # to the measured roof height interpolated there: ridges land where the planes meet, and steps follow
+    # the measured edge instead of a coarse staircase.
+    fine = 0.5 if area < 8000 else (0.75 if area < 25000 else (1.0 if area < 60000 else 1.5))
+    k = int(round(cell / fine)); fine = cell / k
+    Rf, Cf = Rn * k, Cn * k
+    fi = (np.arange(Rf) + .5) / k - .5; fj = (np.arange(Cf) + .5) / k - .5
+    FI, FJ = np.meshgrid(fi, fj, indexing='ij')
+    meas = ndimage.map_coordinates(np.where(mask, ndimage.gaussian_filter(hgt, 0.7), hgt), [FI, FJ], order=1, mode='nearest')
+    FU = u0 + (FJ + .5) * cell; FV = v0 + (FI + .5) * cell
+    PL = np.asarray(planes, float)
+    ci = np.clip(np.floor(FI + .5).astype(int), 0, Rn - 1); cj = np.clip(np.floor(FJ + .5).astype(int), 0, Cn - 1)
+    best = label[ci, cj]; err = np.abs(PL[best, 0] * FU + PL[best, 1] * FV + PL[best, 2] - meas)
+    for oi in range(-2, 3):
+        for oj in range(-2, 3):
+            ln = label[np.clip(ci + oi, 0, Rn - 1), np.clip(cj + oj, 0, Cn - 1)]
+            e = np.abs(PL[ln, 0] * FU + PL[ln, 1] * FV + PL[ln, 2] - meas)
+            best = np.where(e < err, ln, best); err = np.minimum(e, err)
+    for _ in range(2):           # drop single-cell speckle: the most common label among the 3 x 3 neighbours
+        pad = np.pad(best, 1, mode='edge')
+        stack = np.stack([pad[1 + a_:1 + a_ + Rf, 1 + b_:1 + b_ + Cf] for a_ in (-1, 0, 1) for b_ in (-1, 0, 1)])
+        cnt = (stack[:, None] == stack[None, :]).sum(0)
+        best = np.take_along_axis(stack, cnt.argmax(0)[None], 0)[0]
+    best = absorb_fragments(best, min_cells=int(math.ceil(60 / fine ** 2)))
+    pl = GEO.Planes(best, planes, ang, u0, v0, fine)
+    meshes, profile = GEO.roof_and_walls(pg, pl, terr, cut_lines=cut_lines)
+    big = area > 1800
+    doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big)
+    use = tags.get('building') or ('house' if area < 2500 else 'yes')
+    wins, fh, base = GEO.facade(pg, pl, terr, profile, doors, use)
+    tops = np.array([PL[label[i_, j_], 0] * GU[i_, j_] + PL[label[i_, j_], 1] * GV[i_, j_] + PL[label[i_, j_], 2] for i_, j_ in zip(*np.nonzero(mask))])
+    eave = float(np.percentile(tops, 15) - grade); top = float(np.percentile(tops, 99.5) - grade)
+    slopes = [(math.degrees(math.atan(math.hypot(a_, b_))), int((best == k_).sum())) for k_, (a_, b_, _) in enumerate(planes)]
+    pitched = [(s_, n_) for s_, n_ in slopes if s_ > 8 and n_ > 0]
+    pitch = float(np.average([s_ for s_, _ in pitched], weights=[n_ for _, n_ in pitched])) if pitched else 0.0
+    cen = pg.centroid
+    return dict(type='mesh', x=round(cen.x, 2), z=round(cen.y, 2), rot=round(-ang, 4), grade=round(grade, 2),
+                w=round(u1 - u0 - cell, 1), d=round(v1 - v0 - cell, 1), wall_h=round(eave, 1), eave_h=round(eave, 1),
+                ridge_h=round(top, 1), area_ft2=round(area), stories=max(1, int(round(max(eave, 8) / fh))), floor_h=fh,
+                roof=dict(type='grid', pitch_deg=round(pitch, 1), planes=len(planes)),
+                mesh=meshes, windows=wins, doors=doors,
+                provenance=dict(heights=heights_src, roof='measured' if heights_src == 'measured' else heights_src,
+                                windows='generated', doors=sorted({d[5] for d in doors})))
 
 
 def morphology_label_keep_large(M, G, min_ft2):
