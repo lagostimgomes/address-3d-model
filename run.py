@@ -24,12 +24,14 @@ HOSTS = [
 
 
 def probe(url):
+    """True if the host answers at all (any HTTP status, even 5xx: that is the service, not a block).
+    False only when the connection itself is refused, e.g. by a sandbox egress proxy."""
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'address-3d-model/1.0'})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            return r.status < 500
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return True
     except urllib.error.HTTPError as e:
-        return e.code < 500 and e.code not in (403, 407)
+        return e.code != 407
     except Exception:
         return False
 
@@ -81,7 +83,17 @@ def main():
     py = sys.executable
     fetch = [py, os.path.join(ROOT, 'pipeline', 'fetch', 'fetch_site.py'), a.address, '--out-root', work]
     if a.lat is not None: fetch += ['--lat', str(a.lat), '--lon', str(a.lon)]
-    step(fetch, 4, 'fetch')
+    print(f'\n== fetch: {" ".join(fetch)}', flush=True)
+    if subprocess.run(fetch).returncode != 0:
+        # USGS and Census services fail transiently (502/503); one clean retry in a fresh folder
+        print('\n== fetch failed; retrying once in 20 s', flush=True)
+        import time; time.sleep(20)
+        k = 2
+        while os.path.exists(os.path.join(os.path.abspath(a.work), f'retry{k}', slug)): k += 1
+        work = os.path.join(os.path.abspath(a.work), f'retry{k}'); os.makedirs(work, exist_ok=True)
+        folder = os.path.join(work, slug)
+        fetch[fetch.index('--out-root') + 1] = work
+        step(fetch, 4, 'fetch (retry)')
     print('\n== osm (streets and footprints; optional)', flush=True)
     subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder])
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'analyze_site.py'), folder], 5, 'analyze')

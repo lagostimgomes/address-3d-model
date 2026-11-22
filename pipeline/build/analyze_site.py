@@ -313,6 +313,9 @@ def analyze(folder, verbose=True):
     # featured: building containing / nearest the geocode
     def dist0(c): return math.hypot(c['rect']['cx'], c['rect']['cz'])
     feat = min(cands, key=dist0)
+    if dist0(feat) > 120:
+        sys.exit(f'no house-sized building within 120 ft of the geocoded point (nearest is {dist0(feat):.0f} ft away); '
+                 'the geocode may be off, or the building is not a house')
     fpt = np.array([feat['rect']['cx'], feat['rect']['cz']])
     nr = nearest_road(fpt, polys) if polys else None
     if nr:
