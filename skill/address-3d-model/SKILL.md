@@ -34,7 +34,7 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
 | Exit | Meaning | What to do |
 | --- | --- | --- |
 | 0 | Done. `RESULT.html` is the page. | Go to step 3. |
-| 3 | Network blocked. `RESULT.blocked_hosts` lists the hosts. | If a `device_bash` tool for the user's computer is available, rerun steps 1–2 there, in a connected folder. Otherwise stop. Tell the user, kindly and briefly: on Free, Pro and Max plans, turn on **Allow network egress** in Settings → Capabilities; on Team or Enterprise, ask an org owner to add these hosts to the code execution network allowlist. List the blocked hosts and link https://lagostimgomes.github.io/address-3d-model/#network. |
+| 3 | Network blocked. `RESULT.blocked_hosts` lists the hosts. | If a `device_bash` tool for the user's computer is available, rerun steps 1–2 there, in a connected folder. Otherwise stop. Tell the user, kindly and briefly: on Pro and Max plans, allow these hosts under network access in Settings → Capabilities; on Team or Enterprise, ask an org owner to add them to the code execution network allowlist; the Free plan can't reach them. List the blocked hosts and link https://lagostimgomes.github.io/address-3d-model/#network. |
 | 4 | Fetch failed. | Read the last 30 lines of `sites/<slug>/fetch.log`. If geocoding failed, retry once with a cleaned-up address (full street name, city, state, ZIP). If no LiDAR dataset covers the point, tell the user that the area has no public USGS point cloud yet. |
 | 5 | Analysis failed, for example no buildings found. | Report it plainly. It usually means very sparse or old LiDAR, or the geocode landed off the parcel. |
 | 6 | Build failed. | Report the error. |
@@ -73,4 +73,4 @@ Write three or four sentences, without pasting the HTML:
 - Model frame: feet, +x east, +z south, origin at the geocode, heights relative to the terrain at the origin.
 - If the user says the wrong house is highlighted, rerun with `--lat/--lon` of the right house (taken from scene.json's neighbor `x`/`z`, or from the user) in a new `--work` folder.
 - To refine a model on request (colors, house numbers, a porch), edit `sites/<slug>/scene.json` and rerun `"$PY" "$A/pipeline/build/build_model.py" sites/<slug>`. Don't refetch.
-- Sources to credit if asked: USGS 3DEP (public domain), © OpenStreetMap contributors (ODbL), the U.S. Census Bureau geocoder.
+- Sources to credit if asked: USGS 3DEP (public domain), U.S. DOT National Address Database (public domain), © OpenStreetMap contributors (ODbL), the U.S. Census Bureau geocoder.
