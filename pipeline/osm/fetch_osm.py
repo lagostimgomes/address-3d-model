@@ -27,17 +27,17 @@ def to_model(lat, lon, site):
 def overpass(query, log):
     last = None
     for url in ENDPOINTS:
-        for attempt in range(2):
+        for attempt in range(1):
             try:
                 data = urllib.parse.urlencode({'data': query}).encode()
                 req = urllib.request.Request(url, data=data, headers={'User-Agent': 'address-3d-model/1.0'})
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with urllib.request.urlopen(req, timeout=25) as r:
                     raw = r.read()
                 log.append(f'POST {url} -> {len(raw)} bytes')
                 return json.loads(raw), url
             except Exception as e:
                 last = e; log.append(f'POST {url} attempt {attempt + 1} failed: {type(e).__name__}: {e}')
-                time.sleep(2 * (attempt + 1))
+                time.sleep(1)
     raise RuntimeError(f'all Overpass endpoints failed: {last}')
 
 

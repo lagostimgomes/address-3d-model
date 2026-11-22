@@ -63,6 +63,7 @@ def main():
     a = ap.parse_args()
     if (a.lat is None) != (a.lon is None):
         print('RESULT: ' + json.dumps({'ok': False, 'stage': 'input', 'error': '--lat and --lon go together'})); sys.exit(2)
+    res = {}
     if not a.skip_preflight:
         res, blocked = preflight(a.lat is not None)
         print('network:', ', '.join(f"{h} {'ok' if v else 'BLOCKED'}" for h, v in res.items()))
@@ -107,8 +108,11 @@ def main():
         fetch[fetch.index('--out-root') + 1] = work
         step(fetch, 4, 'fetch (retry)')
     if loc: json.dump(loc, open(os.path.join(folder, 'locate.json'), 'w'), indent=1)
-    print('\n== osm (streets and footprints; optional)', flush=True)
-    subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder])
+    if res and not res.get('overpass-api.de', True):
+        print('\n== osm: skipped (overpass-api.de unreachable in preflight); paving comes from LiDAR', flush=True)
+    else:
+        print('\n== osm (streets and footprints; optional)', flush=True)
+        subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder], timeout=120)
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'analyze_site.py'), folder], 5, 'analyze')
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'build_model.py'), folder], 6, 'build')
     scene = json.load(open(os.path.join(folder, 'scene.json')))
