@@ -585,15 +585,21 @@ def analyze(folder, verbose=True):
     for c in cands:
         if c is feat: continue
         p = np.array([c['rect']['cx'], c['rect']['cz']]); dv = p - fpt
+        if fh['roof']['type'] in ('facets', 'massing'): dv_min = c['d0']
         dist = float(np.hypot(*dv))
         if dist < 25 or dist > 260: continue
         t = float(dv @ tangent); off = float(dv @ front)
-        if abs(off) > max(45, abs(t) * 0.8): continue      # across the street or behind
-        if nr:
+        campus = fh['roof']['type'] in ('facets', 'massing')   # big buildings: nearest neighbours in any direction
+        if not campus and abs(off) > max(45, abs(t) * 0.8): continue      # across the street or behind
+        if nr and not campus:
             q = nearest_road(p, polys)
             if q and q[0] > 1.8 * nr[0] + 40: continue
         key = 'right' if t > 0 else 'left'
+        if campus: key = f'near{len(picks)}'; picks[key] = (dist, c); continue
         if key not in picks or dist < picks[key][0]: picks[key] = (dist, c)
+    if fh['roof']['type'] in ('facets', 'massing'):
+        near = sorted(picks.values(), key=lambda v: v[0])[:2]
+        picks = {('left', 'right')[k]: v for k, v in enumerate(near)}
     for key, (dist, c) in picks.items():
         p = np.array([c['rect']['cx'], c['rect']['cz']])
         q = nearest_road(p, polys) if polys else None
