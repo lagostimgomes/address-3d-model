@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* VOICE: an architect's site model, calm and exact.
+   IDEA: the street as it stands, rebuilt from LiDAR, one house picked out in yellow.
+   PICTURE: the featured house and its two neighbours in 3D on real terrain, orbitable.
+   COLOUR and TYPE: the houses' own brick, siding and shingle; black ink, #ffe600 accent; Hanken Grotesk.
+   LAYOUT: scene edge to edge; one card bottom-left with facts and view controls. */
+:root{color-scheme:light dark;--card:light-dark(#ffffffee,#232322ee);--ink:light-dark(#151515,#f1f1ee);--mute:light-dark(#5c5f61,#a9aaa5);--line:light-dark(#d8d8d4,#3a3a38);--bg:light-dark(#e9ecee,#1a1a19);--acc:#ffe600}
+:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Hanken Grotesk",system-ui,sans-serif;overflow:hidden}
+#scene{position:fixed;inset:0}
+#scene canvas{display:block;width:100%;height:100%;touch-action:none}
+.card{position:fixed;left:16px;bottom:16px;width:min(380px,calc(100vw - 32px));background:var(--card);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:14px;padding:18px 20px 16px;box-shadow:0 10px 30px #0002}
+.card h1{font-size:clamp(26px,4vw,34px);line-height:1.05;margin:0;font-weight:700;text-wrap:balance}
+.sub{color:var(--mute);margin:4px 0 10px;font-size:15px}
+.tag{display:inline-block;background:var(--acc);color:#151515;font-size:13px;font-weight:700;border-radius:4px;padding:1px 7px;margin-bottom:8px}
+.tag.n{background:var(--line);color:var(--ink)}
+dl{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:0 0 10px}
+dl div{border-top:1px solid var(--line);padding-top:6px}
+dt{font-size:13px;color:var(--mute)}
+dd{margin:0;font-size:17px;font-weight:700;white-space:nowrap}
+.look{font-size:14px;margin:0 0 12px;color:var(--ink)}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+button{font:500 15px "Hanken Grotesk",system-ui,sans-serif;min-height:44px;padding:0 14px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
+button[aria-pressed=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.note{font-size:13px;color:var(--mute);margin:12px 0 0}
+.hint{position:fixed;top:14px;right:16px;font-size:13px;color:var(--mute);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+@media(max-width:600px){.card{left:8px;right:8px;bottom:8px;width:auto;padding:14px}dd{font-size:15px}.note,.hint,.look{display:none}button{padding:0 10px;font-size:14px}}
+</style>
+</head>
+<body>
+<div id="scene" aria-label="3D model of the featured house and its neighbors"></div>
+<div class="hint">Drag to orbit · scroll or pinch to zoom · tap a house</div>
+<section class="card" aria-live="polite">
+  <span class="tag" id="tag">Featured address</span>
+  <h1 id="addr">__TITLE__</h1>
+  <p class="sub" id="sub"></p>
+  <dl id="stats"></dl>
+  <p class="look" id="look"></p>
+  <div class="btns">
+    <button id="v-street">Street view</button>
+    <button id="v-aerial">Aerial</button>
+    <button id="v-spin" aria-pressed="false">Spin</button>
+    <button id="v-dusk" aria-pressed="false">Dusk</button>
+  </div>
+  <p class="note" id="note"></p>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+{
+const S=/*__DATA__*/null,GRID="__GRID__";
+document.getElementById('sub').textContent=S.sub;
+document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Streets: ${S.street_source==='osm'?'OpenStreetMap':'approximate (no map data)'}. Facades (windows, doors, garages, colours) are generated, not observed.`;
+/* ---------- renderer ---------- */
+const host=document.getElementById('scene');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.outputEncoding=THREE.sRGBEncoding;
+host.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(45,1,1,3000);
+const controls=new THREE.OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true;controls.maxPolarAngle=Math.PI/2.05;controls.minDistance=25;controls.maxDistance=700;
+camera.position.set(120,110,190);controls.target.set(0,10,10);
+const hemi=new THREE.HemisphereLight(0xe4eef6,0x5d7040,0.7);scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xfff1dc,1.15);
+sun.position.set(-120,200,160);sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);
+Object.assign(sun.shadow.camera,{left:-220,right:220,top:220,bottom:-220,near:10,far:700});sun.shadow.bias=-0.0006;scene.add(sun);
+
+/* ---------- procedural textures (UVs are in feet; repeat = 1/tile) ---------- */
+function ctex(w,h,draw,tile){const c=document.createElement('canvas');c.width=w;c.height=h;draw(c.getContext('2d'),w,h);const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.anisotropy=8;if(tile){t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(1/tile,1/tile)}return t}
+const rnd=(()=>{let s=7;return()=>(s=(s*16807)%2147483647)/2147483647})();
+function brickDraw(g,W,H){g.fillStyle='#bfb4a6';g.fillRect(0,0,W,H);const rows=24,rh=H/rows,bw=W/8;
+  for(let r=0;r<rows;r++)for(let i=-1;i<9;i++){const x=i*bw+(r%2)*bw/2;const l=30+rnd()*12,hu=8+rnd()*10;g.fillStyle=`hsl(${hu},${42+rnd()*14}%,${l}%)`;g.fillRect(x+2,r*rh+2,bw-4,rh-4)}}
+function sidingDraw(col){return(g,W,H)=>{g.fillStyle=col;g.fillRect(0,0,W,H);const n=8,bh=H/n;for(let i=0;i<n;i++){const y=i*bh;const gr=g.createLinearGradient(0,y,0,y+bh);gr.addColorStop(0,'rgba(255,255,255,.10)');gr.addColorStop(.85,'rgba(0,0,0,.03)');gr.addColorStop(1,'rgba(0,0,0,.22)');g.fillStyle=gr;g.fillRect(0,y,W,bh)}}}
+function shingleDraw(g,W,H){g.fillStyle='#3a3c40';g.fillRect(0,0,W,H);const rows=16,rh=H/rows;for(let r=0;r<rows;r++){for(let i=-1;i<9;i++){const x=i*32+(r%2)*16+rnd()*6;const v=50+rnd()*22;g.fillStyle=`rgb(${v},${v+1},${v+5})`;g.fillRect(x+1,r*rh,30,rh-2)}g.fillStyle='rgba(0,0,0,.45)';g.fillRect(0,r*rh+rh-2,W,2)}}
+function shakeDraw(g,W,H){g.fillStyle='#c4b18c';g.fillRect(0,0,W,H);for(let r=0;r<10;r++)for(let i=0;i<18;i++){const v=rnd()*24-12;g.fillStyle=`rgba(${v>0?255:0},${v>0?255:0},${v>0?255:0},${Math.abs(v)/120})`;g.fillRect(i*W/18+(r%2)*6,r*H/10,W/18-2,H/10-3)}}
+const mk=(draw,tile,c=512,o={})=>new THREE.MeshStandardMaterial(Object.assign({map:ctex(c,c,draw,tile),roughness:.92},o));
+const MAT={
+  brick:mk(brickDraw,5.33),
+  sid3625:mk(sidingDraw('#a6a8a3'),4.67,256),sid3627:mk(sidingDraw('#cbc5b6'),4.67,256),sid3623:mk(sidingDraw('#c4c5bf'),4.67,256),
+  shingle:mk(shingleDraw,6.5,256),shake:mk(shakeDraw,4,256),
+  trim:new THREE.MeshStandardMaterial({color:0xf4f3ee,roughness:.7}),
+  grass:new THREE.MeshStandardMaterial({color:0x3d6524,roughness:1}),grassAcross:new THREE.MeshStandardMaterial({color:0x5c8538,roughness:1}),
+  asphalt:new THREE.MeshStandardMaterial({color:0x3c3f42,roughness:.95,side:THREE.DoubleSide}),conc:new THREE.MeshStandardMaterial({color:0xcbc8c0,roughness:.9,side:THREE.DoubleSide}),
+  drive:new THREE.MeshStandardMaterial({color:0x2c2f32,roughness:.95}),mulch:new THREE.MeshStandardMaterial({color:0x5a3a28,roughness:1}),
+  black:new THREE.MeshStandardMaterial({color:0x1b1c1e,roughness:.6}),stone:new THREE.MeshStandardMaterial({color:0xa9a49a,roughness:1,flatShading:true}),
+  shrub:new THREE.MeshStandardMaterial({color:0x2f5a2c,roughness:1,flatShading:true}),trunk:new THREE.MeshStandardMaterial({color:0x5b4636,roughness:1}),
+  acc:new THREE.MeshStandardMaterial({color:0xffe600,emissive:0x5a5200,roughness:.6}),deck:new THREE.MeshStandardMaterial({color:0x8f7a64,roughness:.9})
+};
+const solid=c=>new THREE.MeshStandardMaterial({color:c,roughness:.75});
+
+/* windows: colour map with grilles + emissive map for dusk */
+function drawWin(g,W,H,arched,lit){
+  g.clearRect(0,0,W,H);const path=(i)=>{g.beginPath();if(arched){g.moveTo(i,H-i);g.lineTo(i,W/2);g.arc(W/2,W/2,W/2-i,Math.PI,0);g.lineTo(W-i,H-i)}else g.rect(i,i,W-2*i,H-2*i);g.closePath()};
+  path(0);g.fillStyle=lit?'#000':'#f6f5f0';g.fill();
+  path(9);const gr=g.createLinearGradient(0,0,W,H);gr.addColorStop(0,lit?'#ffd58a':'#4d5d6b');gr.addColorStop(.5,lit?'#ffc26a':'#24313c');gr.addColorStop(1,lit?'#ffcf80':'#3a4855');g.fillStyle=gr;g.fill();
+  if(lit)return;g.save();path(9);g.clip();g.strokeStyle='#f3f2ec';g.lineWidth=4;
+  const top=arched?W/2:9;for(const fx of[1/3,2/3]){g.beginPath();g.moveTo(W*fx,top);g.lineTo(W*fx,H);g.stroke()}
+  const mid=arched?(W/2+H)/2:H*.52;g.lineWidth=8;g.beginPath();g.moveTo(0,mid);g.lineTo(W,mid);g.stroke();g.lineWidth=4;
+  for(const y of[(top+mid)/2,(mid+H)/2]){g.beginPath();g.moveTo(0,y);g.lineTo(W,y);g.stroke()}
+  if(arched){g.beginPath();g.moveTo(0,W/2);g.lineTo(W,W/2);g.stroke();for(const a of[.25,.5,.75]){g.beginPath();g.moveTo(W/2,W/2);g.lineTo(W/2-Math.cos(a*Math.PI)*W/2,W/2-Math.sin(a*Math.PI)*W/2);g.stroke()}}
+  g.restore();g.fillStyle='rgba(255,255,255,.12)';g.beginPath();g.moveTo(14,H*.2);g.lineTo(W*.45,14);g.lineTo(W*.6,14);g.lineTo(14,H*.32);g.fill();
+}
+const winMat={};
+for(const a of[false,true]){winMat[a]=new THREE.MeshStandardMaterial({map:ctex(128,a?224:200,(g,W,H)=>drawWin(g,W,H,a,false)),emissiveMap:ctex(128,a?224:200,(g,W,H)=>drawWin(g,W,H,a,true)),emissive:0xffffff,emissiveIntensity:0,transparent:true,alphaTest:.5,roughness:.3,metalness:.1})}
+function garageMat(col){return new THREE.MeshStandardMaterial({roughness:.6,map:ctex(256,208,(g,W,H)=>{g.fillStyle=col;g.fillRect(0,0,W,H);for(let r=0;r<4;r++){g.fillStyle='rgba(0,0,0,.35)';g.fillRect(0,r*H/4,W,3);for(let c=0;c<4;c++){const x=c*W/4+10,y=r*H/4+12,w=W/4-20,h=H/4-22;g.fillStyle='rgba(255,255,255,.10)';g.fillRect(x,y,w,3);g.fillRect(x,y,3,h);g.fillStyle='rgba(0,0,0,.22)';g.fillRect(x,y+h-3,w,3);g.fillRect(x+w-3,y,3,h)}}})})}
+function doorMat(col){return new THREE.MeshStandardMaterial({roughness:.5,map:ctex(128,256,(g,W,H)=>{g.fillStyle=col;g.fillRect(0,0,W,H);[[14,14,40,60],[74,14,40,60],[14,88,40,70],[74,88,40,70],[14,172,40,70],[74,172,40,70]].forEach(([x,y,w,h])=>{g.fillStyle='rgba(255,255,255,.09)';g.fillRect(x,y,w,4);g.fillRect(x,y,4,h);g.fillStyle='rgba(0,0,0,.3)';g.fillRect(x,y+h-4,w,4);g.fillRect(x+w-4,y,4,h)});g.fillStyle='#c8a64a';g.beginPath();g.arc(100,132,5,0,7);g.fill()})})}
+
+/* ---------- geometry helpers ---------- */
+function mesh(geo,mat,x,y,z,p,shadow=true){const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);m.castShadow=shadow;m.receiveShadow=true;p.add(m);return m}
+function boxUV(w,h,d){const g=new THREE.BoxGeometry(w,h,d),uv=g.attributes.uv,dims=[[d,h],[d,h],[w,d],[w,d],[w,h],[w,h]];for(let f=0;f<6;f++)for(let i=0;i<4;i++){const k=f*4+i;uv.setXY(k,uv.getX(k)*dims[f][0],uv.getY(k)*dims[f][1])}return g}
+function box(w,h,d,mat,x,y,z,p,s){return mesh(boxUV(w,h,d),mat,x,y,z,p,s)}
+// wall with brick (or other) front and siding elsewhere: material order px,nx,py,ny,pz,nz
+function wall(p,w,h,d,x,y,z,front,side,frontSides){return mesh(boxUV(w,h,d),[frontSides?front:side,frontSides?front:side,side,side,front,side],x,y,z,p)}
+// gable: wall triangle + shingle slabs + white rake boards. axis 'x' => ridge runs along local x.
+function gable(p,axis,span,len,h,base,cx,cz,wallMat,ends=[1,-1]){
+  const sh=new THREE.Shape();sh.moveTo(-span/2,0);sh.lineTo(span/2,0);sh.lineTo(0,h);sh.closePath();
+  const g=new THREE.ExtrudeGeometry(sh,{depth:len,bevelEnabled:false});g.translate(0,0,-len/2);if(axis==='x')g.rotateY(Math.PI/2);
+  mesh(g,wallMat,cx,base,cz,p);
+  const a=Math.atan(h/(span/2)),run=span/2+1.2,L=run/Math.cos(a),off=(L/2)*Math.cos(a),y=base+h-(L/2)*Math.sin(a)+.4;
+  for(const s of[1,-1]){
+    if(axis==='x'){const m=box(len+2,.6,L,MAT.shingle,cx,y,cz+s*off,p);m.rotation.x=s*a;
+      for(const e of ends){const r=box(.5,.9,L,MAT.trim,cx+e*(len/2+.75),y-.35,cz+s*off,p,false);r.rotation.x=s*a}}
+    else{const m=box(L,.6,len+2,MAT.shingle,cx+s*off,y,cz,p);m.rotation.z=-s*a;
+      for(const e of ends){const r=box(L,.9,.5,MAT.trim,cx+s*off,y-.35,cz+e*(len/2+.75),p,false);r.rotation.z=-s*a}}
+  }
+}
+const glows=[];
+function win(p,x,y,z,o={}){
+  const w=o.w||3,h=o.h||(o.arched?5.6:4.8),gp=new THREE.Group();gp.position.set(x,y,z);gp.rotation.y=o.ry||0;p.add(gp);
+  const pl=mesh(new THREE.PlaneGeometry(w,h),winMat[!!o.arched],0,0,.12,gp,false);glows.push(pl);
+  box(w+.5,.35,.5,MAT.trim,0,-h/2-.15,.2,gp,false);
+  if(!o.arched)box(w+.6,.45,.3,MAT.trim,0,h/2+.2,.12,gp,false);
+  if(o.shutter)for(const s of[-1,1])box(w*.48,h+.2,.22,o.shutter,s*(w/2+w*.24+.2),0,.12,gp,false);
+  return gp;
+}
+function oculus(p,x,y,z,r){mesh(new THREE.CircleGeometry(r,32),MAT.trim,x,y,z,p,false);const v=mesh(new THREE.CircleGeometry(r*.72,32),solid(0x30363c),x,y,z+.03,p,false);glows.push(v)}
+function garageDoor(p,x,z,w,col){box(w+.9,7.6,.25,MAT.trim,x,3.8,z+.05,p,false);mesh(new THREE.PlaneGeometry(w,7),garageMat(col),x,3.5,z+.2,p,false)}
+function frontDoor(p,x,z,col,o={}){
+  box(5.2,8.8+(o.transom?1.4:0),.3,MAT.trim,x,4.4+1.2+(o.transom?.7:0),z+.08,p,false);
+  mesh(new THREE.PlaneGeometry(3.2,7),doorMat(col),x,1.2+3.5,z+.26,p,false);
+  if(o.transom){const t=mesh(new THREE.PlaneGeometry(3.2,1),winMat[false],x,9.3,z+.26,p,false);glows.push(t)}
+  if(o.pediment){const sh=new THREE.Shape();sh.moveTo(-3,0);sh.lineTo(3,0);sh.lineTo(0,1.3);sh.closePath();mesh(new THREE.ExtrudeGeometry(sh,{depth:.5,bevelEnabled:false}),MAT.trim,x,10.4+(o.transom?1.4:0)-1.2,z,p,false)}
+}
+function shrub(p,x,z,r=1.8,cone=false){settle(cone?mesh(new THREE.ConeGeometry(r,r*3.6,7),MAT.shrub,x,r*1.8,z,p):mesh(new THREE.IcosahedronGeometry(r,0),MAT.shrub,x,r*.75,z,p),p)}
+function bed(p,x,z,w,d){settle(box(w,.25,d,MAT.mulch,x,.12,z,p,false),p)}
+function tree(p,x,z,s,col,bare=.5){
+  const g=new THREE.Group();g.position.set(x,0,z);g.scale.setScalar(s);p.add(g);settle(g,p);
+  mesh(new THREE.CylinderGeometry(.7,1.1,16,7),MAT.trunk,0,8,0,g);
+  const m=new THREE.MeshStandardMaterial({color:col,roughness:1,flatShading:true,transparent:bare<1,opacity:bare<1?.92:1});
+  mesh(new THREE.IcosahedronGeometry(10,1),m,0,22,0,g);mesh(new THREE.IcosahedronGeometry(7,1),m,4,28,-2,g);mesh(new THREE.IcosahedronGeometry(6.5,1),m,-4,26,3,g);
+}
+function arbor(p,x,z,h=20){settle(mesh(new THREE.ConeGeometry(3,h,8),MAT.shrub,x,h/2+1,z,p),p);settle(mesh(new THREE.CylinderGeometry(.4,.5,2,6),MAT.trunk,x,1,z,p),p)}
+function lamp(p0,x0,z0){const p=new THREE.Group(),x=0,z=0;p.position.set(x0,0,z0);p0.add(p);settle(p,p0);mesh(new THREE.CylinderGeometry(.18,.25,7,8),MAT.black,x,3.5,z,p);box(1,1.4,1,solid(0xffe9b8),x,7.6,z,p,false);mesh(new THREE.ConeGeometry(.9,.8,4),MAT.black,x,8.7,z,p).rotation.y=Math.PI/4;}
+function mailbox(p0,x0,z0){const p=new THREE.Group();p.position.set(x0,0,z0);p0.add(p);settle(p,p0);box(.45,4,.45,MAT.trim,0,2,0,p);box(1.2,1.2,2,MAT.black,0,4.4,0,p)}
+
+/* ---------- terrain: bare-earth DEM, feet relative to PAD, rows north->south ---------- */
+const DN=S.n,DC=S.cell,DEM=Float32Array.from(GRID.split(','),v=>v/10);
+function hAt(x,z){let fx=x/DC+DN/2-.5,fz=z/DC+DN/2-.5;fx=Math.max(0,Math.min(DN-1.001,fx));fz=Math.max(0,Math.min(DN-1.001,fz));const i=Math.floor(fz),j=Math.floor(fx),u=fx-j,v=fz-i,g=(r,c)=>DEM[r*DN+c];
+  return g(i,j)*(1-u)*(1-v)+g(i,j+1)*u*(1-v)+g(i+1,j)*(1-u)*v+g(i+1,j+1)*u*v}
+function settle(o,p){const v=o.position.clone();if(p!==scene)p.localToWorld(v);o.position.y+=hAt(v.x,v.z)-(p===scene?0:p.position.y);return o}
+function terrain(size,seg,drop,mat){const g=new THREE.PlaneGeometry(size,size,seg,seg);g.rotateX(-Math.PI/2);const p=g.attributes.position;for(let i=0;i<p.count;i++)p.setY(i,hAt(p.getX(i),p.getZ(i))-drop);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m);return m}
+const EXT=DN*DC;terrain(EXT,DN-1,0,MAT.grass);terrain(EXT*4,120,.6,MAT.grass);
+
+/* ---------- streets: OpenStreetMap centrelines (or a straight stand-in in front of the house) ---------- */
+const HALF={motorway:24,trunk:22,primary:20,secondary:17,tertiary:15,unclassified:13,residential:14,living_street:12,service:7};
+const FEAT=S.houses.find(h=>h.role==='featured');
+let ROADS=S.roads.slice();
+if(!ROADS.length){const f=S.front,t=[-f[1],f[0]],c=[FEAT.x+f[0]*(FEAT.d/2+42),FEAT.z+f[1]*(FEAT.d/2+42)];ROADS=[{hw:'residential',pts:[[c[0]-t[0]*400,c[1]-t[1]*400],[c[0]+t[0]*400,c[1]+t[1]*400]]}]}
+const RP=[];
+function ribbon(SP,a,b,y,mat){const pos=[],idx=[],N=SP.length;SP.forEach((p,i)=>{const q=SP[Math.min(N-1,i+1)],o=SP[Math.max(0,i-1)];const tx=q.x-o.x,tz=q.z-o.z,L=Math.hypot(tx,tz)||1;const nx=tz/L,nz=-tx/L;const ax=p.x+nx*a,az=p.z+nz*a,bx=p.x+nx*b,bz=p.z+nz*b,c=hAt(p.x,p.z);
+  pos.push(ax,Math.max(c,hAt(ax,az))+y,az,bx,Math.max(c,hAt(bx,bz))+y,bz);if(i)idx.push(2*i-2,2*i-1,2*i,2*i-1,2*i+1,2*i)});
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setIndex(idx);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m);return m}
+for(const r of ROADS){const pts=[];for(const p of r.pts){const v=new THREE.Vector3(p[0],0,p[1]);if(!pts.length||pts[pts.length-1].distanceTo(v)>1)pts.push(v)}if(pts.length<2)continue;
+  const cv=new THREE.CatmullRomCurve3(pts),L=cv.getLength(),SP=cv.getSpacedPoints(Math.max(8,Math.round(L/3)));const hw=HALF[r.hw]||12;
+  for(const p of SP)RP.push(p);ribbon(SP,-hw,hw,.12,MAT.asphalt);
+  if(hw>=12&&hw<=17){ribbon(SP,hw,hw+.9,.5,MAT.conc);ribbon(SP,-hw-.9,-hw,.5,MAT.conc);ribbon(SP,hw+4.5,hw+8.5,.2,MAT.conc);ribbon(SP,-hw-8.5,-hw-4.5,.2,MAT.conc)}}
+const roadDist=(x,z)=>{let m=1e9;for(const p of RP){const d=(p.x-x)**2+(p.z-z)**2;if(d<m)m=d}return Math.sqrt(m)};
+
+/* ---------- house parts ---------- */
+function driveway(g,x0,x1,front){const v=new THREE.Vector3();let L=0;for(;L<160;L+=.5){v.set((x0+x1)/2,0,front+L);g.localToWorld(v);if(roadDist(v.x,v.z)<15.2)break}
+  if(L>=160)return 0;const pos=[],idx=[],N=16;for(let k=0;k<=N;k++){const zz=front+L*k/N;for(const xx of[x0,x1]){v.set(xx,0,zz);g.localToWorld(v);pos.push(xx,hAt(v.x,v.z)+.2-g.position.y,zz)}if(k)idx.push(2*k-2,2*k,2*k-1,2*k-1,2*k,2*k+1)}
+  const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setIndex(idx);geo.computeVertexNormals();const m=new THREE.Mesh(geo,MAT.drive);m.receiveShadow=true;g.add(m);return L}
+function basement(g,w,d,mat){wall(g,w,40,d,0,-20,0,mat,mat);const v=new THREE.Vector3(0,0,-d/2-4);g.localToWorld(v);const r=hAt(v.x,v.z)-g.position.y;
+  if(r<-5){const y=r+4.2;win(g,-w/4,y,-d/2,{ry:Math.PI});box(6,7,.3,MAT.trim,w/5,r+3.6,-d/2-.1,g,false);mesh(new THREE.PlaneGeometry(5.4,6.6),winMat[false],w/5,r+3.6,-d/2-.3,g,false).rotation.y=Math.PI}return r}
+function deck(g,x,z,w,d){box(w,1,d,MAT.deck,x,1.2,z,g);box(w,3,.3,MAT.trim,x,3.2,z-d/2,g,false);for(const sx of[-1,1]){const v=new THREE.Vector3(x+sx*(w/2-.6),0,z-d/2+.6);g.localToWorld(v);const gr=hAt(v.x,v.z)-g.position.y;const hgt=Math.max(.5,1.2-gr);box(.7,hgt,.7,MAT.deck,x+sx*(w/2-.6),1.2-hgt/2,z-d/2+.6,g)}}
+function hipRoof(p,w,d,h,base,o=1.2){const W=w/2+o,D=d/2+o,lx=w>=d,r=Math.max(0,(lx?W-D:D-W));const s=h/((lx?D:W));const H=(lx?D:W)*s;
+  const A=[-W,0,-D],B=[W,0,-D],C=[W,0,D],Dd=[-W,0,D],R1=lx?[-r,H,0]:[0,H,-r],R2=lx?[r,H,0]:[0,H,r];
+  const tris=lx?[[Dd,C,R2],[Dd,R2,R1],[B,A,R1],[B,R1,R2],[A,Dd,R1],[C,B,R2]]:[[Dd,C,R2],[A,Dd,R2],[A,R2,R1],[C,B,R1],[C,R1,R2],[B,A,R1]];
+  const pos=[],uv=[];for(const t of tris)for(const v of t){pos.push(...v);uv.push(v[0],v[2]+v[1])}
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.computeVertexNormals();
+  const m=mesh(g,MAT.shingle,0,base+.3,0,p);m.material.side=THREE.DoubleSide;return m}
+function roofBand(g,w,d,y,x=0,z=0){box(w+1.2,.9,d+1.2,MAT.trim,x,y,z,g,false)}
+function corners(g,w,d,h){for(const sx of[-1,1])for(const sz of[-1,1])box(.6,h,.6,MAT.trim,sx*(w/2),h/2,sz*(d/2),g,false)}
+function label(text,featured){const c=document.createElement('canvas');c.width=256;c.height=100;const g=c.getContext('2d');g.fillStyle=featured?'#ffe600':'#ffffff';g.beginPath();g.roundRect?g.roundRect(8,8,240,70,14):g.rect(8,8,240,70);g.fill();g.beginPath();g.moveTo(112,78);g.lineTo(128,96);g.lineTo(144,78);g.fill();g.fillStyle='#151515';
+  let fs=44;g.font=`700 ${fs}px "Hanken Grotesk",system-ui,sans-serif`;while(g.measureText(text).width>220&&fs>20){fs-=2;g.font=`700 ${fs}px "Hanken Grotesk",system-ui,sans-serif`}g.textAlign='center';g.textBaseline='middle';g.fillText(text,128,45);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false}));s.scale.set(20,7.8,1);s.renderOrder=9;return s}
+
+/* ---------- houses: footprint, walls, roof and cross gables measured from LiDAR; facade generated ---------- */
+const pick=[],GROUPS={};
+function buildHouse(H){
+  const g=new THREE.Group();g.position.set(H.x,H.grade,H.z);g.rotation.y=H.rot;g.userData.id=H.id;scene.add(g);g.updateMatrixWorld();GROUPS[H.id]=g;
+  const w=H.w,d=H.d,wh=H.wall_h,R=H.roof,SD=mk(sidingDraw(H.siding),4.67,256),st=Math.max(1,H.stories||1),fh=wh/st;
+  wall(g,w,wh,d,0,wh/2,0,SD,SD);roofBand(g,w,d,wh+.2);corners(g,w,d,wh);
+  if(R.type==='flat'){box(w+1,1,d+1,solid(0x55585c),0,wh+.6,0,g);box(w+1.2,1.6,.5,MAT.trim,0,wh+1.4,d/2+.5,g,false)}
+  else if(R.type==='hip')hipRoof(g,w,d,R.h,wh+.6);
+  else if(R.ridge_axis==='z')gable(g,'z',w,d,R.h,wh+.6,0,0,SD);else gable(g,'x',d,w,R.h,wh+.6,0,0,SD);
+  for(const c of(R.cross||[])){const len=Math.max(6,c.to-c.from),cz=(c.to+c.from)/2;
+    if(R.ridge_axis!=='z'){const pos=Math.max(-w/2+c.span/2,Math.min(w/2-c.span/2,c.pos));
+      if(c.to>d/2+1.5){const bd=c.to-d/2;wall(g,c.span-.8,wh,bd,pos,wh/2,d/2+bd/2,SD,SD);roofBand(g,c.span-.8,bd,wh+.2,pos,d/2+bd/2)}
+      gable(g,'z',c.span,len,c.h,wh+.6,pos,cz,SD,[1]);if(c.h>7)oculus(g,pos,wh+.6+c.h*.42,Math.max(d/2,c.to)+.15,Math.min(1.2,c.span/14))}
+    else gable(g,'x',c.span,len,c.h,wh+.6,cz,c.pos,SD,[1])}
+  // front facade
+  const gs=H.garage_side,nG=w>=40?2:(w>=28?1:0),gw=8.6,gzone=nG*(gw+1.2)+1,gx=gs*(w/2-gzone/2-1.2),dz=d/2;
+  if(nG){for(let k=0;k<nG;k++)garageDoor(g,gx+(k-(nG-1)/2)*(gw+1.2),dz,gw,H.garage);}
+  const dx=nG?-gs*Math.min(w*.14,w/2-6):-w*.12;frontDoor(g,dx,dz+.02,H.door,{transom:st>1});
+  box(5.6,.6,3.4,MAT.conc,dx,.3,dz+1.7,g);
+  for(let f=0;f<st;f++){const y=f*fh+fh*.55,n=Math.max(1,Math.floor((w-6)/8));for(let k=0;k<n;k++){const x=-w/2+3+(k+.5)*(w-6)/n;
+    if(f===0&&(Math.abs(x-dx)<4.2||(nG&&Math.abs(x-gx)<gzone/2+1.6)))continue;win(g,x,y,dz,{})}}
+  // sides and back
+  for(const sx of[-1,1])for(let f=0;f<st;f++){const n=Math.max(1,Math.floor(d/14));for(let k=0;k<n;k++){const z=-d/2+(k+.5)*d/n;if(f===0&&nG&&sx===gs&&z>d/2-24)continue;win(g,sx*(w/2),f*fh+fh*.55,z,{ry:sx*Math.PI/2})}}
+  for(let f=0;f<st;f++){const n=Math.max(1,Math.floor((w-6)/10));for(let k=0;k<n;k++)win(g,-w/2+3+(k+.5)*(w-6)/n,f*fh+fh*.55,-d/2,{ry:Math.PI})}
+  const back=basement(g,w,d,SD);if(back<-5)deck(g,0,-d/2-6,Math.min(18,w*.45),12);
+  if(nG)driveway(g,gx-gzone/2+.5,gx+gzone/2-.5,dz);
+  const walk=new THREE.Vector3();for(let k=1;k<=4;k++){}
+  for(const x of[dx-4.5,dx+4.5])shrub(g,x,dz+2.2,1.5);
+  const l=label(H.label,H.role==='featured');l.position.set(0,(H.ridge_h||wh+10)+9,0);g.add(l);
+  g.traverse(o=>{if(o.isMesh)pick.push(o)});
+}
+S.houses.forEach(buildHouse);
+
+/* featured footprint outline */
+{const H=FEAT,g=GROUPS[H.id],o=4,pts=[[-H.w/2-o,H.d/2+o],[H.w/2+o,H.d/2+o],[H.w/2+o,-H.d/2-o],[-H.w/2-o,-H.d/2-o],[-H.w/2-o,H.d/2+o]],a=new THREE.Vector3(),b=new THREE.Vector3();
+  for(let e=0;e<4;e++){const[x0,z0]=pts[e],[x1,z1]=pts[e+1];const n=Math.ceil(Math.hypot(x1-x0,z1-z0)/4);for(let k=0;k<n;k++){a.set(x0+(x1-x0)*k/n,0,z0+(z1-z0)*k/n);b.set(x0+(x1-x0)*(k+1)/n,0,z0+(z1-z0)*(k+1)/n);g.localToWorld(a);g.localToWorld(b);
+    const m=mesh(new THREE.BoxGeometry(1,.3,a.distanceTo(b)+.3),MAT.acc,(a.x+b.x)/2,(hAt(a.x,a.z)+hAt(b.x,b.z))/2+.35,(a.z+b.z)/2,scene,false);m.rotation.y=Math.atan2(b.x-a.x,b.z-a.z)}}}
+
+/* trees at LiDAR canopy peaks */
+{const T=S.trees.filter(t=>roadDist(t.x,t.z)>10),N=T.length;if(N){const crown=new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1,1),new THREE.MeshStandardMaterial({roughness:1,flatShading:true}),N),trunk=new THREE.InstancedMesh(new THREE.CylinderGeometry(.5,.7,1,6),MAT.trunk,N);
+  crown.castShadow=trunk.castShadow=true;crown.receiveShadow=true;const m=new THREE.Matrix4(),c=new THREE.Color(),pal=[0x5a4630,0x6e5434,0x4a5428,0x24401f,0x5e3a22,0x3c4826,0x6b5230,0x2f5a2c];
+  T.forEach((t,i)=>{const gy=hAt(t.x,t.z),r=Math.max(5,Math.min(16,t.h*.3));m.compose(new THREE.Vector3(t.x,gy+t.h-r*.95,t.z),new THREE.Quaternion(),new THREE.Vector3(r,r*1.1,r));crown.setMatrixAt(i,m);c.set(pal[i%pal.length]);crown.setColorAt(i,c);
+    const th=Math.max(4,t.h-r*1.6);m.compose(new THREE.Vector3(t.x,gy+th/2,t.z),new THREE.Quaternion(),new THREE.Vector3(Math.max(.8,t.h/40),th,Math.max(.8,t.h/40)));trunk.setMatrixAt(i,m)});
+  scene.add(crown,trunk)}}
+
+/* ---------- UI ---------- */
+const ROOFN={gable:'Gable',hip:'Hip',flat:'Flat'};
+function show(id){const H=S.houses.find(h=>h.id===id);const tag=document.getElementById('tag');tag.textContent=H.role==='featured'?'Featured address':'Neighbor';tag.className='tag'+(H.role==='featured'?'':' n');
+  document.getElementById('addr').textContent=H.role==='featured'?S.title:(H.number?`${H.number} ${H.street||S.street||''}`.trim():'Neighboring house');
+  document.getElementById('stats').innerHTML=[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]].map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+  const cg=(H.roof.cross||[]).length;document.getElementById('look').textContent=`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`}
+show(FEAT.id);
+const F=S.front,FX=FEAT.x,FZ=FEAT.z;
+let fly=null;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+function goTo(p,t){fly={p0:camera.position.clone(),t0:controls.target.clone(),p1:new THREE.Vector3(...p),t1:new THREE.Vector3(...t),k:0}}
+const fy=hAt(FX+F[0]*(FEAT.d/2+45),FZ+F[1]*(FEAT.d/2+45));
+document.getElementById('v-street').onclick=()=>goTo([FX+F[0]*(FEAT.d/2+46)+F[1]*12,fy+6,FZ+F[1]*(FEAT.d/2+46)-F[0]*12],[FX,FEAT.grade+12,FZ]);
+document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*40,320,FZ+F[1]*40],[FX,0,FZ]);
+const spinB=document.getElementById('v-spin');spinB.onclick=()=>{controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=1.1;spinB.setAttribute('aria-pressed',controls.autoRotate)};
+const duskB=document.getElementById('v-dusk');
+function setDusk(on){duskB.setAttribute('aria-pressed',on);const sky=new THREE.Color(on?0x2a2540:0xc9d6df);scene.background=sky;scene.fog=new THREE.Fog(sky,420,1300);
+  hemi.intensity=on?.25:.7;hemi.color.set(on?0x8f7aa8:0xe4eef6);sun.intensity=on?.5:1.15;sun.color.set(on?0xff9a5a:0xfff1dc);sun.position.set(on?-260:-120,on?80:200,on?40:160);for(const k in winMat)winMat[k].emissiveIntensity=on?1:0}
+setDusk(document.documentElement.dataset.theme==='dark'||(!document.documentElement.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches));
+duskB.onclick=()=>setDusk(duskB.getAttribute('aria-pressed')!=='true');
+const ray=new THREE.Raycaster(),ptr=new THREE.Vector2();let down=null;
+renderer.domElement.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY]});
+renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const r=renderer.domElement.getBoundingClientRect();ptr.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);ray.setFromCamera(ptr,camera);const hit=ray.intersectObjects(pick)[0];if(!hit)return;let o=hit.object;while(o&&!o.userData.id)o=o.parent;
+  if(o){show(o.userData.id);const f=new THREE.Vector3(0,0,95);o.localToWorld(f);goTo([f.x+20,o.position.y+24,f.z],[o.position.x,o.position.y+12,o.position.z])}});
+function resize(){const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.fov=w<600?58:45;camera.updateProjectionMatrix()}
+const ro=new ResizeObserver(resize);ro.observe(host);resize();
+const D0=innerWidth<600?175:135;camera.position.set(FX+F[0]*D0-F[1]*60,FEAT.grade+110,FZ+F[1]*D0+F[0]*60);controls.target.set(FX,FEAT.grade+10,FZ);
+goTo([FX+F[0]*D0*.85-F[1]*45,FEAT.grade+62,FZ+F[1]*D0*.85+F[0]*45],[FX,FEAT.grade+8,FZ]);
+window.__cam=(p,t)=>{fly=null;camera.position.set(...p);controls.target.set(...t);controls.update()};window.__S=S;
+renderer.setAnimationLoop(()=>{if(fly){fly.k=reduce?1:Math.min(1,fly.k+.022);const e=1-Math.pow(1-fly.k,3);camera.position.lerpVectors(fly.p0,fly.p1,e);controls.target.lerpVectors(fly.t0,fly.t1,e);if(fly.k>=1)fly=null}controls.update();renderer.render(scene,camera)});
+}
+</script>
+</body>
+</html>

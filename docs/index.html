@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Address to 3D model</title>
+<meta name="description" content="Type a US address into Claude and get a 3D model of the house, its neighbors, the terrain and the trees, measured from public USGS LiDAR. No coding.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+/* VOICE: a friendly surveyor's handout: plain words, exact steps.
+   IDEA: a site plan sheet: contour lines, a yellow-highlighted lot, numbered call-outs.
+   PICTURE: three houses rising out of LiDAR dots on contoured ground, the middle one in yellow.
+   COLOUR and TYPE: paper white, survey ink, one survey-yellow #ffe600; Hanken Grotesk.
+   LAYOUT: hero with picture, then four numbered steps as the spine, then what you get, help, and the terminal route. */
+:root{color-scheme:light dark;--bg:light-dark(#fbfaf6,#141513);--ink:light-dark(#151515,#f0efe9);--mute:light-dark(#5b5e60,#a8a9a3);--line:light-dark(#dedcd3,#33342f);--card:light-dark(#ffffff,#1c1d1a);--acc:#ffe600;--accInk:#151515;--grn:light-dark(#3d6524,#7fae5a)}
+:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+html{scroll-padding-top:24px}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 "Hanken Grotesk",system-ui,sans-serif;overflow-x:clip}
+a{color:inherit;text-decoration-thickness:2px;text-underline-offset:3px;text-decoration-color:var(--acc)}
+.wrap{max-width:1120px;margin:0 auto;padding:0 max(5vw,18px)}
+header.top{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 0;font-size:15px;flex-wrap:wrap}
+header.top b{font-weight:800}
+header.top nav{display:flex;gap:18px;flex-wrap:wrap}
+.hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:clamp(24px,4vw,56px);align-items:center;padding:clamp(18px,4vw,48px) 0 clamp(28px,5vw,64px)}
+h1{font-size:clamp(36px,5.4vw,58px);line-height:1.03;margin:0 0 18px;font-weight:800;letter-spacing:-.01em;text-wrap:balance}
+.lede{font-size:clamp(18px,2vw,21px);color:var(--mute);margin:0 0 26px;max-width:34em}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:52px;padding:0 22px;border-radius:12px;background:var(--acc);color:var(--accInk);font-weight:800;text-decoration:none;border:2px solid #151515;box-shadow:4px 4px 0 #151515;transition:transform .12s}
+.btn:hover{transform:translate(-1px,-1px)}.btn:active{transform:translate(2px,2px);box-shadow:2px 2px 0 #151515}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--ink);box-shadow:none}
+.small{font-size:14px;color:var(--mute)}
+.fig{position:relative;aspect-ratio:1.18;border-radius:18px;overflow:hidden;border:1px solid var(--line);background:light-dark(#eef1e8,#1b2016)}
+.fig svg{position:absolute;inset:0;width:100%;height:100%}
+section{padding:clamp(34px,6vw,76px) 0;border-top:1px solid var(--line)}
+h2{font-size:clamp(28px,3.6vw,40px);line-height:1.08;margin:0 0 10px;font-weight:800;text-wrap:balance}
+.intro{color:var(--mute);max-width:40em;margin:0 0 30px}
+ol.steps{list-style:none;margin:0;padding:0;display:grid;gap:18px}
+ol.steps>li{display:grid;grid-template-columns:64px minmax(0,1fr);gap:18px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.num{width:52px;height:52px;border-radius:50%;background:var(--acc);color:#151515;display:grid;place-items:center;font-weight:800;font-size:24px;border:2px solid #151515}
+ol.steps h3{margin:4px 0 6px;font-size:22px;line-height:1.2}
+ol.steps p{margin:0 0 10px}
+.path{display:inline-block;font-weight:700;background:light-dark(#f2f0e6,#262722);border:1px solid var(--line);border-radius:6px;padding:0 7px;white-space:nowrap}
+.prompt{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;margin-top:8px}
+.prompt code{flex:1 1 280px;display:block;background:light-dark(#151515,#000);color:#f4f3ee;border-radius:10px;padding:14px 16px;font:500 16px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.copy{min-height:48px;min-width:84px;border-radius:10px;border:2px solid var(--ink);background:transparent;color:var(--ink);font:700 15px "Hanken Grotesk",system-ui,sans-serif;cursor:pointer}
+.copy:focus-visible,.btn:focus-visible,summary:focus-visible{outline:3px solid var(--acc);outline-offset:3px}
+.plans{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:10px}
+.plan{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:light-dark(#fdfcf8,#191a17)}
+.plan b{display:block;margin-bottom:4px}
+ul.hosts{margin:8px 0 0;padding-left:20px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:15px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px}
+.box h3{margin:0 0 10px;font-size:20px}
+.box ul{margin:0;padding-left:20px}.box li{margin:4px 0}
+.tag{display:inline-block;font-size:13px;font-weight:800;border-radius:4px;padding:1px 8px;margin-bottom:8px}
+.tag.m{background:var(--acc);color:#151515}.tag.g{background:var(--line);color:var(--ink)}
+details{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:10px}
+summary{cursor:pointer;padding:16px 18px;font-weight:700;list-style:none;min-height:44px}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";float:right;font-weight:800}
+details[open] summary::after{content:"–"}
+details>div{padding:0 18px 16px;color:var(--ink)}
+pre{background:light-dark(#151515,#000);color:#f4f3ee;border-radius:12px;padding:16px;overflow-x:auto;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+footer{padding:36px 0 60px;border-top:1px solid var(--line);font-size:14px;color:var(--mute)}
+@media(max-width:820px){.hero{grid-template-columns:1fr}.fig{order:-1;aspect-ratio:1.45}.two,.plans{grid-template-columns:1fr}}
+@media(max-width:600px){ol.steps>li{grid-template-columns:1fr;gap:8px}.num{width:44px;height:44px;font-size:20px}header.top nav{display:none}}
+@media(prefers-reduced-motion:no-preference){.dot{animation:fall 2.6s ease-out both}@keyframes fall{from{opacity:0;transform:translateY(-14px)}to{opacity:1;transform:none}}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top"><b>Address → 3D model</b><nav><a href="#steps">How to use it</a><a href="#network">Network setting</a><a href="#help">Help</a><a href="https://github.com/lagostimgomes/address-3d-model">Code</a></nav></header>
+
+<div class="hero">
+  <div>
+    <h1>Type an address. Get a 3D model of the house and its street.</h1>
+    <p class="lede">A free add-on (a "skill") for Claude. Give it a US street address and it builds a 3D model you can spin around: the house, the house on each side, the real ground, the street and the trees. All of it is measured from public government laser scans. No coding needed.</p>
+    <div class="cta">
+      <a class="btn" href="address-3d-model.zip" download>Download the skill</a>
+      <a class="btn ghost" href="#steps">See the 4 steps</a>
+    </div>
+    <p class="small" style="margin-top:14px">Works with a Claude account on claude.ai or the Claude app. Takes about 5 minutes to set up, then about 3 minutes per address.</p>
+  </div>
+  <div class="fig" aria-label="Illustration: three houses rising out of laser-scan dots on contoured ground, the middle house highlighted in yellow">
+    <svg id="art" viewBox="0 0 590 500" preserveAspectRatio="xMidYMid slice"></svg>
+  </div>
+</div>
+</div>
+
+<section id="steps"><div class="wrap">
+  <h2>How to use it, in 4 steps</h2>
+  <p class="intro">Steps 1–3 happen once. After that it's only step 4.</p>
+  <ol class="steps">
+    <li><span class="num">1</span><div>
+      <h3>Download the skill</h3>
+      <p>Click the yellow button to download <b>address-3d-model.zip</b>. Don't unzip it; Claude wants the zip file as it is.</p>
+      <a class="btn" href="address-3d-model.zip" download>Download address-3d-model.zip</a>
+    </div></li>
+    <li><span class="num">2</span><div>
+      <h3>Add it to Claude</h3>
+      <p>In Claude, open <span class="path">Customize</span> → <span class="path">Skills</span>, choose <span class="path">Upload a skill</span>, and pick the zip you just downloaded. The skill turns on by itself.</p>
+      <p class="small">If you don't see Skills, turn on <span class="path">Code execution and file creation</span> in Settings → Capabilities first. <a href="https://support.claude.com/en/articles/12512180-use-skills-in-claude">Claude's help page on skills</a>.</p>
+    </div></li>
+    <li id="network"><span class="num">3</span><div>
+      <h3>Let Claude reach the map data</h3>
+      <p>Claude runs the skill in a locked-down workspace that can't reach most websites. The skill needs to download public maps and laser scans, so allow that once:</p>
+      <div class="plans">
+        <div class="plan"><b>Free, Pro or Max plan (personal account)</b>In <span class="path">Settings</span> → <span class="path">Capabilities</span>, turn on <span class="path">Allow network egress</span>.</div>
+        <div class="plan"><b>Team or Enterprise plan (work or school)</b>Only an owner of your organization can change this. Send them the list below and ask them to add it under <span class="path">Organization settings</span> → <span class="path">Capabilities</span> → <span class="path">Code execution</span>.</div>
+      </div>
+      <p style="margin:14px 0 4px"><b>Websites the skill uses</b> (all public, no accounts):</p>
+      <ul class="hosts" id="hosts"><li>geocoding.geo.census.gov</li><li>nominatim.openstreetmap.org</li><li>s3-us-west-2.amazonaws.com</li><li>elevation.nationalmap.gov</li><li>overpass-api.de</li><li>mdgeodata.md.gov</li></ul>
+      <div class="prompt" style="margin-top:10px"><button class="copy" data-copy="hosts">Copy list</button></div>
+      <p class="small">GitHub and Python packages, which the skill also uses, are usually allowed already. <a href="https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude">Claude's help page on network access</a>.</p>
+    </div></li>
+    <li><span class="num">4</span><div>
+      <h3>Ask for a model</h3>
+      <p>Start a new chat and type something like this, with your own address:</p>
+      <div class="prompt"><code id="ask">Make a 3D model of 1600 Pennsylvania Ave NW, Washington, DC 20500</code><button class="copy" data-copy="ask">Copy</button></div>
+      <p class="small" style="margin-top:10px">Claude works for 2–5 minutes, then gives you a link to the model. Drag to spin it, scroll to zoom, and tap a house to see its measurements. The link is private to you until you share it.</p>
+    </div></li>
+  </ol>
+</div></section>
+
+<section><div class="wrap">
+  <h2>What you get</h2>
+  <p class="intro">The shapes are measured; the details are filled in. The model page says the same.</p>
+  <div class="two">
+    <div class="box"><span class="tag m">Measured</span><h3>From public data</h3><ul>
+      <li>Where each house stands and which way it faces</li>
+      <li>Footprint size, wall height and roof height</li>
+      <li>Roof shape (gable, hip or flat), steepness and cross gables</li>
+      <li>The real slope of the ground, to within about a foot</li>
+      <li>Trees, where they are and how tall</li>
+      <li>The street, from OpenStreetMap</li></ul></div>
+    <div class="box"><span class="tag g">Filled in</span><h3>Generated to look right</h3><ul>
+      <li>Windows, doors and garage doors</li>
+      <li>Siding colors</li>
+      <li>Shrubs, decks and driveway shape</li>
+      <li>Small roof details such as dormers and porches, which are left out</li></ul></div>
+  </div>
+</div></section>
+
+<section id="help"><div class="wrap">
+  <h2>If something goes wrong</h2>
+  <p class="intro">Claude tells you what happened in plain words. These are the usual cases.</p>
+  <details><summary>Claude says some websites are blocked</summary><div>Step 3 isn't done yet, or your organization hasn't added the websites. Claude lists the ones it couldn't reach. Turn on network access, or send that list to your organization's owner, then ask again.</div></details>
+  <details><summary>Claude says there's no laser-scan data for the address</summary><div>The skill uses the U.S. Geological Survey's 3D Elevation Program, which covers most of the country but not every place yet. Very rural areas, some territories and a few cities have no data or only old data.</div></details>
+  <details><summary>Only one neighbor (or none) appears</summary><div>That's normal for corner lots, houses next to an empty lot or a park, and rural homes. The skill only shows houses it actually found in the scan.</div></details>
+  <details><summary>The house faces the wrong way, or the roof looks off</summary><div>Older or sparser scans give rougher roofs, and trees over a roof can confuse it. Ask Claude to fix it in plain words, for example "the front faces the other street" or "make the roof a hip roof". It can edit the model without downloading again.</div></details>
+  <details><summary>Is my address shared with anyone?</summary><div>To find the address on a map, the skill sends it to the U.S. Census Bureau's address lookup, and if that fails, to OpenStreetMap's. The scans and maps are then downloaded by location. Nothing is looked up about who lives there. The finished model is private to your Claude account unless you share its link.</div></details>
+  <details><summary>Does it work outside the US?</summary><div>Not yet. It relies on U.S. government laser scans and terrain data.</div></details>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Comfortable with a terminal?</h2>
+  <p class="intro">The same skill works in <a href="https://claude.com/claude-code">Claude Code</a>, which runs on your own computer with your normal internet, so step 3 isn't needed. Skills in your Claude account appear in Claude Code automatically. To add it by hand:</p>
+<pre>git clone https://github.com/lagostimgomes/address-3d-model
+mkdir -p ~/.claude/skills
+cp -r address-3d-model/skill/address-3d-model ~/.claude/skills/
+# then, in Claude Code:  make a 3D model of &lt;address&gt;</pre>
+  <p class="intro">Or run the pipeline yourself, without Claude:</p>
+<pre>cd address-3d-model
+pip install -r requirements.txt
+python run.py "1600 Pennsylvania Ave NW, Washington, DC 20500"
+# writes sites/&lt;address&gt;/index.html</pre>
+</div></section>
+
+<div class="wrap"><footer>
+  Data: <a href="https://www.usgs.gov/3d-elevation-program">USGS 3D Elevation Program</a> (public domain), © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> (ODbL), and the U.S. Census Bureau geocoder. 3D rendering by <a href="https://threejs.org">three.js</a>.
+  Built by Claude and Codex. Code on <a href="https://github.com/lagostimgomes/address-3d-model">GitHub</a>. Not affiliated with USGS or Anthropic.
+</footer></div>
+
+<script>
+{
+/* copy buttons */
+for(const b of document.querySelectorAll('.copy'))b.addEventListener('click',async()=>{const el=document.getElementById(b.dataset.copy);const t=el.tagName==='UL'?[...el.children].map(li=>li.textContent).join('\n'):el.textContent;
+  try{await navigator.clipboard.writeText(t);const o=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=o,1500)}catch(e){const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r)}});
+
+/* hero picture: contour lines, LiDAR dots, three houses in isometric, the middle one highlighted */
+const svg=document.getElementById('art'),NS='http://www.w3.org/2000/svg';
+const dark=matchMedia('(prefers-color-scheme: dark)').matches&&document.documentElement.dataset.theme!=='light'||document.documentElement.dataset.theme==='dark';
+const C=dark?{ground:'#1b2016',contour:'#33402a',dot:'#7fae5a',wall:'#2a2c28',side:'#222420',roof:'#3a3d42',roofD:'#2c2f33',line:'#0e0f0d'}:{ground:'#eef1e8',contour:'#c9d3bd',dot:'#3d6524',wall:'#f4f3ee',side:'#dcdad2',roof:'#4a4d52',roofD:'#36393d',line:'#151515'};
+const el=(t,a,p=svg)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);p.appendChild(e);return e};
+el('rect',{x:0,y:0,width:590,height:500,fill:C.ground});
+for(let i=0;i<11;i++){let d='';for(let x=-20;x<=610;x+=10){const y=40+i*44+Math.sin((x+i*37)/70)*14+Math.sin(x/160+i)*10;d+=(x<0?'M':'L')+x+','+y.toFixed(1)}el('path',{d,fill:'none',stroke:C.contour,'stroke-width':1.4})}
+// isometric projection
+const K=2.5,iso=(x,y,z)=>[295+(x-z)*0.87*K,285+(x+z)*0.5*K-y*K];
+const P=a=>a.map(p=>iso(...p).map(v=>v.toFixed(1)).join(',')).join(' ');
+let seed=3;const r=()=>(seed=(seed*16807)%2147483647)/2147483647;
+const gDots=el('g',{});
+function house(cx,cz,w,d,h,rh,hi,delay){
+  const g=el('g',{});
+  // lidar dots on roof planes
+  for(let k=0;k<90;k++){const u=r()-.5,v=r()-.5;const x=cx+u*w,z=cz+v*d,y=h+rh*(1-Math.abs(v)*2);const[px,py]=iso(x,y+2,z);
+    const c=el('circle',{cx:px,cy:py,r:2.6,fill:hi?'#151515':C.dot,class:'dot',style:`animation-delay:${(delay+r()*0.6).toFixed(2)}s`},gDots)}
+  const x0=cx-w/2,x1=cx+w/2,z0=cz-d/2,z1=cz+d/2;
+  el('polygon',{points:P([[x1,0,z0],[x1,0,z1],[x1,h,z1],[x1,h,z0]]),fill:hi?'#e6cf00':C.side,stroke:C.line,'stroke-width':2,'stroke-linejoin':'round'},g);
+  el('polygon',{points:P([[x0,0,z1],[x1,0,z1],[x1,h,z1],[x0,h,z1]]),fill:hi?'#ffe600':C.wall,stroke:C.line,'stroke-width':2,'stroke-linejoin':'round'},g);
+  // gable roof, ridge along x
+  el('polygon',{points:P([[x0-2,h,z1+2],[x1+2,h,z1+2],[x1+2,h+rh,cz],[x0-2,h+rh,cz]]),fill:C.roof,stroke:C.line,'stroke-width':2,'stroke-linejoin':'round'},g);
+  el('polygon',{points:P([[x1+2,h,z1+2],[x1+2,h,z0-2],[x1+2,h+rh,cz]]),fill:hi?'#ffe600':C.side,stroke:C.line,'stroke-width':2,'stroke-linejoin':'round'},g);
+  // windows
+  const n=Math.floor(w/9);for(let f=0;f<2;f++)for(let k=0;k<n;k++){const x=x0+(k+.5)*w/n;el('polygon',{points:P([[x-1.8,f*10+4,z1],[x+1.8,f*10+4,z1],[x+1.8,f*10+8.5,z1],[x-1.8,f*10+8.5,z1]]),fill:hi?'#151515':'#4d5d6b'},g)}
+  return g}
+house(-56,-22,40,32,20,10,false,0);house(0,0,40,32,20,10,true,.15);house(56,22,40,32,20,9,false,.3);
+svg.appendChild(gDots);
+// label
+const[lx,ly]=iso(0,44,0);el('rect',{x:lx-58,y:ly-50,width:116,height:36,rx:8,fill:'#ffe600',stroke:'#151515','stroke-width':2});
+el('path',{d:`M${lx-8},${ly-14} L${lx},${ly-4} L${lx+8},${ly-14}Z`,fill:'#ffe600',stroke:'#151515','stroke-width':2});
+el('rect',{x:lx-9,y:ly-16,width:18,height:4,fill:'#ffe600'});
+const t=el('text',{x:lx,y:ly-26,'text-anchor':'middle','font-family':'Hanken Grotesk, system-ui, sans-serif','font-weight':800,'font-size':17,fill:'#151515'});t.textContent='Your address';
+}
+</script>
+</body>
+</html>
