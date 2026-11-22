@@ -77,7 +77,7 @@ def build(folder, out=None):
     sub = m.group(2).strip() if m else ''
     years = sorted({d['year'] for d in scene['datasets'] if d['year']}, reverse=True)
     data = dict(title=title, sub=sub, lat=site['lat'], lon=site['lon'], pad=pad, n=dem['rows'], cell=dem['cell_size_ft'],
-                houses=houses, trees=scene['trees'], roads=roads, front=scene['street']['front'],
+                houses=houses, trees=scene['trees'], roads=roads, front=scene['street']['front'], pavement=scene.get('pavement'),
                 street_source=scene['street']['source'], street=street_name,
                 lidar=', '.join(f"{d['name']} ({d['year'] or 'n.d.'})" for d in scene['datasets']),
                 lidar_years=' and '.join(str(y) for y in years), precision=loc.get('precision', 'given'),

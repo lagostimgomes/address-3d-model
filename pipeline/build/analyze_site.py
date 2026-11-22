@@ -71,7 +71,7 @@ def load_lidar(folder, site, terrain, radius=330):
             m = (np.abs(x) < radius) & (np.abs(z) < radius)
             if m.any():
                 rows.append(np.c_[x[m], np.asarray(l.z)[m], z[m], np.asarray(l.classification)[m],
-                                  np.asarray(l.number_of_returns)[m]])
+                                  np.asarray(l.number_of_returns)[m], np.asarray(l.intensity)[m]])
         if not rows: continue
         P = np.vstack(rows)
         g = P[:, 3] == 2
@@ -87,7 +87,7 @@ def load_lidar(folder, site, terrain, radius=330):
         scale, off, spread = best
         y = P[:, 1] * scale - terrain.pad - off
         out.append(dict(name=name, year=dataset_year(name), x=P[:, 0], y=y, z=P[:, 2], cls=P[:, 3].astype(int),
-                        nret=P[:, 4].astype(int), hag=y - T, offset_ft=off, spread_ft=spread, n=len(P)))
+                        nret=P[:, 4].astype(int), inten=P[:, 5], hag=y - T, offset_ft=off, spread_ft=spread, n=len(P)))
     if not out: sys.exit('no usable LiDAR datasets in lidar/manifest.json')
     out.sort(key=lambda d: -d['year'])
     return out
@@ -283,6 +283,147 @@ def measure_building(P, planes, terrain, front_hint):
     return out, info
 
 
+def _local_planes(hgt, mask, GX, GZ, win=5):
+    """Least-squares plane over a win x win window at every cell: slope (a, b), offset, rms residual."""
+    from scipy import ndimage
+    w = mask.astype(float)
+    f = lambda v: ndimage.uniform_filter(v * w, size=win, mode='constant')
+    n = f(np.ones_like(hgt)); X = GX; Z = GZ; Hh = np.nan_to_num(hgt)
+    Sx, Sz, Sh = f(X), f(Z), f(Hh); Sxx, Szz, Sxz = f(X * X), f(Z * Z), f(X * Z); Sxh, Szh, Shh = f(X * Hh), f(Z * Hh), f(Hh * Hh)
+    M = np.stack([np.stack([Sxx, Sxz, Sx], -1), np.stack([Sxz, Szz, Sz], -1), np.stack([Sx, Sz, n], -1)], -2)
+    r = np.stack([Sxh, Szh, Sh], -1)
+    M = M + np.eye(3) * 1e-6
+    ok = n * win * win > 6
+    sol = np.zeros(hgt.shape + (3,))
+    sol[ok] = np.linalg.solve(M[ok], r[ok][..., None])[..., 0]
+    a, b, c = sol[..., 0], sol[..., 1], sol[..., 2]
+    # residual: E[(h - aX - bZ - c)^2]
+    res = (Shh - 2 * (a * Sxh + b * Szh + c * Sh) + a * a * Sxx + b * b * Szz + c * c * n + 2 * (a * b * Sxz + a * c * Sx + b * c * Sz)) / np.maximum(n, 1e-6)
+    return a, b, c, np.sqrt(np.clip(res, 0, None)), ok
+
+
+def facets(c, terr, front_vec, cell=2.5):
+    """Complex or large building: segment the roof into planar facets by region growing on a height
+    raster, each facet a polygon with its plane. Rendered as prisms from the ground up to the plane."""
+    from scipy import ndimage
+    from skimage import measure, morphology
+    from collections import deque
+    Pw = c['P']
+    # raster aligned with the building's main axis, so walls come out straight and corners square
+    ang = c['rect']['ang']; ca, sa = math.cos(ang), math.sin(ang)
+    P = np.c_[Pw[:, 0] * ca + Pw[:, 2] * sa, Pw[:, 1], -Pw[:, 0] * sa + Pw[:, 2] * ca]
+    x0, z0 = float(P[:, 0].min()) - 2 * cell, float(P[:, 2].min()) - 2 * cell
+    j = ((P[:, 0] - x0) / cell).astype(int); i = ((P[:, 2] - z0) / cell).astype(int)
+    shape = (i.max() + 3, j.max() + 3)
+    occ = np.zeros(shape, bool); occ[i, j] = True
+    mask = ndimage.binary_closing(occ, iterations=1) | occ
+    mask = morphology.remove_small_holes(mask, max_size=60)
+    mask = morphology.remove_small_objects(mask, max_size=24)
+    sums = np.zeros(shape); cnt = np.zeros(shape)
+    np.add.at(sums, (i, j), P[:, 1]); np.add.at(cnt, (i, j), 1)
+    hgt = np.where(cnt > 0, sums / np.maximum(cnt, 1), np.nan)
+    idx = ndimage.distance_transform_edt(np.isnan(hgt), return_distances=False, return_indices=True)
+    hgt = hgt[tuple(idx)]
+    hgt = np.where(mask, ndimage.median_filter(hgt, size=3), hgt)
+    gx = x0 + (np.arange(shape[1]) + .5) * cell; gz = z0 + (np.arange(shape[0]) + .5) * cell
+    GX, GZ = np.meshgrid(gx, gz)
+    la, lb, lc, lres, lok = _local_planes(hgt, mask, GX, GZ)
+    label = np.zeros(shape, int); planes = []
+    order = np.argsort(np.where(mask & lok, lres, 1e9), axis=None)
+    nbr = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    for flat in order:
+        si, sj = divmod(int(flat), shape[1])
+        if not mask[si, sj] or label[si, sj] or lres[si, sj] > 0.6: continue
+        k = len(planes) + 1; pa, pb = la[si, sj], lb[si, sj]; pc = hgt[si, sj] - pa * GX[si, sj] - pb * GZ[si, sj]
+        reg = [(si, sj)]; label[si, sj] = k; q = deque([(si, sj)]); added = 0
+        while q:
+            ci, cj = q.popleft()
+            for di, dj in nbr:
+                ni, nj = ci + di, cj + dj
+                if ni < 0 or nj < 0 or ni >= shape[0] or nj >= shape[1]: continue
+                if not mask[ni, nj] or label[ni, nj]: continue
+                if abs(hgt[ni, nj] - (pa * GX[ni, nj] + pb * GZ[ni, nj] + pc)) > 1.0: continue
+                if lres[ni, nj] < 0.6 and abs(la[ni, nj] - pa) + abs(lb[ni, nj] - pb) > 0.16: continue
+                label[ni, nj] = k; reg.append((ni, nj)); q.append((ni, nj)); added += 1
+                if added % 25 == 0 and len(reg) >= 8:
+                    R = np.array(reg); A = np.c_[GX[R[:, 0], R[:, 1]], GZ[R[:, 0], R[:, 1]], np.ones(len(R))]
+                    pa, pb, pc = np.linalg.lstsq(A, hgt[R[:, 0], R[:, 1]], rcond=None)[0]
+        if len(reg) < 10:
+            for ri, rj in reg: label[ri, rj] = 0
+            continue
+        R = np.array(reg); A = np.c_[GX[R[:, 0], R[:, 1]], GZ[R[:, 0], R[:, 1]], np.ones(len(R))]
+        pa, pb, pc = np.linalg.lstsq(A, hgt[R[:, 0], R[:, 1]], rcond=None)[0]
+        planes.append([float(pa), float(pb), float(pc)])
+    # leftovers (ridges, clutter): join the adjacent facet whose plane fits best, else the nearest facet
+    for _ in range(6):
+        left = mask & (label == 0)
+        if not left.any() or not planes: break
+        for li, lj in zip(*np.nonzero(left)):
+            best = None
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    ni, nj = li + di, lj + dj
+                    if 0 <= ni < shape[0] and 0 <= nj < shape[1] and label[ni, nj] > 0:
+                        pa, pb, pc = planes[label[ni, nj] - 1]
+                        e = abs(hgt[li, lj] - (pa * GX[li, lj] + pb * GZ[li, lj] + pc))
+                        if best is None or e < best[0]: best = (e, label[ni, nj])
+            if best: label[li, lj] = best[1]
+    if (mask & (label == 0)).any() and planes:
+        idx = ndimage.distance_transform_edt(label == 0, return_distances=False, return_indices=True)
+        label = np.where(mask, label[tuple(idx)], 0)
+    if not planes:
+        planes = [[0.0, 0.0, float(np.median(hgt[mask]))]]; label = np.where(mask, 1, 0)
+    for _ in range(3):
+        changed = False
+        for k in range(1, len(planes) + 1):
+            R = label == k; n = int(R.sum())
+            if n == 0 or n >= 20: continue
+            ring = ndimage.binary_dilation(R) & ~R & mask
+            cand = [l for l in np.unique(label[ring]) if l > 0 and l != k]
+            if not cand: continue
+            def fit(l):
+                pa, pb, pc = planes[l - 1]
+                return float(np.median(np.abs(hgt[R] - (pa * GX[R] + pb * GZ[R] + pc))))
+            best = min(cand, key=fit)
+            if fit(best) < 3.0 or n < 8: label[R] = best; changed = True
+        if not changed: break
+    out = []
+    for k in np.unique(label[label > 0]):
+        reg, nreg = ndimage.label(label == k)
+        for r in range(1, nreg + 1):
+            R = reg == r
+            if R.sum() < 3: continue
+            pad = np.pad(R, 1).astype(float)
+            rings = []
+            for cnt_ in measure.find_contours(pad, 0.5):
+                cnt_ = measure.approximate_polygon(cnt_, tolerance=0.6)
+                if len(cnt_) < 4: continue
+                uv = [(x0 + (q[1] - 1 + .5) * cell, z0 + (q[0] - 1 + .5) * cell) for q in cnt_[:-1]]
+                pts = [[round(u * ca - v * sa, 2), round(u * sa + v * ca, 2)] for u, v in uv]
+                area = 0.5 * abs(sum(a_[0] * b_[1] - b_[0] * a_[1] for a_, b_ in zip(pts, pts[1:] + pts[:1])))
+                if area >= 6: rings.append((area, pts))
+            if not rings: continue
+            rings.sort(key=lambda t: -t[0])
+            pa, pb, pc = planes[k - 1]
+            pa, pb = pa * ca - pb * sa, pa * sa + pb * ca        # y = a u + b v + c  ->  world x, z
+            out.append(dict(outer=rings[0][1], holes=[r_[1] for r_ in rings[1:]], plane=[round(pa, 5), round(pb, 5), round(pc, 3)],
+                            pitch=round(math.degrees(math.atan(math.hypot(pa, pb))), 1)))
+    us, vs = GX[mask], GZ[mask]
+    xs, zs = us * ca - vs * sa, us * sa + vs * ca
+    tops = hgt[mask]
+    grade = float(np.median(terr(xs, zs)))
+    area = float(mask.sum() * cell * cell)
+    pitched = [f for f in out if f['pitch'] > 8]
+    return dict(type='facets', x=round(float(xs.mean()), 2), z=round(float(zs.mean()), 2),
+                rot=round(math.atan2(front_vec[0], front_vec[1]), 4), grade=round(grade, 2),
+                w=round(float(xs.max() - xs.min() + cell), 1), d=round(float(zs.max() - zs.min() + cell), 1),
+                wall_h=round(float(np.percentile(tops, 25) - grade), 1), eave_h=round(float(np.percentile(tops, 25) - grade), 1),
+                ridge_h=round(float(np.percentile(tops, 99) - grade), 1), area_ft2=round(area),
+                stories=max(1, int(round((np.percentile(tops, 25) - grade) / 11))),
+                roof=dict(type='facets', pitch_deg=round(float(np.median([f['pitch'] for f in pitched])), 1) if pitched else 0,
+                          facets=len(out)), facets=out)
+
+
 def massing(c, terr, front_vec, cell=3.0):
     """Large or complex building: its measured shape as columns on a 3 ft grid (top = 95th pct height)."""
     from scipy import ndimage
@@ -319,6 +460,49 @@ def massing(c, terr, front_vec, cell=3.0):
                 stories=max(1, int(round((np.median(tops) - grade) / 12))),
                 roof=dict(type='massing', pitch_deg=0),
                 grid=dict(x0=round(x0, 2), z0=round(z0, 2), cell=cell, cells=cells))
+
+
+def pavement(prim, extent, n=240):
+    """Paved ground (asphalt) from LiDAR return intensity: asphalt is dark at 1064 nm, grass is bright.
+    Returns a run-length-encoded n x n mask over the terrain square, rows north to south."""
+    from scipy import ndimage
+    from skimage import filters, morphology
+    g = prim['cls'] == 2
+    if g.sum() < 500: return None
+    x, z, it = prim['x'][g], prim['z'][g], prim['inten'][g].astype(float)
+    cell = extent / n
+    j = np.floor(x / cell + n / 2).astype(int); i = np.floor(z / cell + n / 2).astype(int)
+    ok = (i >= 0) & (j >= 0) & (i < n) & (j < n)
+    s_ = np.zeros((n, n)); c_ = np.zeros((n, n))
+    np.add.at(s_, (i[ok], j[ok]), np.log1p(it[ok])); np.add.at(c_, (i[ok], j[ok]), 1)
+    has = c_ > 0
+    if has.sum() < 200: return None
+    v = np.where(has, s_ / np.maximum(c_, 1), np.nan)
+    thr = filters.threshold_otsu(v[has])
+    lo, hi = np.percentile(v[has], [10, 90])
+    if hi - lo < 0.6: return None                        # no usable intensity contrast
+    dark = has & (v < thr)
+    # ground seen through tree canopy is shaded and dark too: drop cells under vegetation
+    veg = (~np.isin(prim['cls'], [2, 7, 9, 17, 18])) & (prim['nret'] > 1) & (prim['hag'] > 3)
+    vj = np.floor(prim['x'][veg] / cell + n / 2).astype(int); vi = np.floor(prim['z'][veg] / cell + n / 2).astype(int)
+    vk = (vi >= 0) & (vj >= 0) & (vi < n) & (vj < n)
+    canopy = np.zeros((n, n), bool); canopy[vi[vk], vj[vk]] = True
+    canopy = ndimage.binary_dilation(canopy, iterations=1)
+    dark &= ~canopy
+    dark = ndimage.median_filter(dark.astype(np.uint8), size=3).astype(bool)
+    dark = morphology.remove_small_objects(dark, max_size=40)
+    dark = morphology.remove_small_holes(dark, max_size=30)
+    rle = []
+    for row in dark:
+        runs = []; k = 0
+        while k < n:
+            if row[k]:
+                s0 = k
+                while k < n and row[k]: k += 1
+                runs += [s0, k - s0]
+            else: k += 1
+        rle.append(runs)
+    return dict(n=n, extent=round(extent, 3), rle=rle, share=round(float(dark.mean()), 3))
 
 
 def analyze(folder, verbose=True):
@@ -389,7 +573,7 @@ def analyze(folder, verbose=True):
             hh = res[0]
             # a house-style fit that is out of house range falls back to massing
             if 8 <= hh['wall_h'] <= 40 and hh['ridge_h'] <= 60 and max(hh['w'], hh['d']) <= 130: return hh
-        return massing(c, terr, front_vec)
+        return facets(c, terr, front_vec)
     houses = []
     fh = mk(feat, front)
     if not fh: sys.exit('could not fit a roof to the featured building')
@@ -442,12 +626,14 @@ def analyze(folder, verbose=True):
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], tangent=[round(float(tangent[0]), 4), round(float(tangent[1]), 4)],
                              name=(nr[3].get('name') if nr else None), source='osm' if nr else 'inferred'),
-                 houses=houses, trees=trees, candidates=len(cands))
+                 houses=houses, trees=trees, candidates=len(cands),
+                 pavement=pavement(prim, E.shape[0] * cell))
     json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), indent=1)
     if verbose:
         for hh in houses:
-            print(f"{hh['id']:9s} at ({hh['x']:7.1f},{hh['z']:7.1f}) rot {hh['rot']:+.3f}  {hh['w']}x{hh['d']} ft  wall {hh['wall_h']}  ridge {hh['ridge_h']}  roof {hh['roof'] if hh['roof']['type'] != 'massing' else 'massing, ' + str(hh['area_ft2']) + ' ft2, ' + str(len(hh['grid']['cells'])) + ' columns'}")
-        print(f"trees {len(trees)}, building candidates {len(cands)}, street source {scene['street']['source']}")
+            print(f"{hh['id']:9s} at ({hh['x']:7.1f},{hh['z']:7.1f}) rot {hh['rot']:+.3f}  {hh['w']}x{hh['d']} ft  wall {hh['wall_h']}  ridge {hh['ridge_h']}  roof {hh['roof'] if hh['roof']['type'] != 'facets' else 'facets: ' + str(hh['roof']['facets']) + ', ' + str(hh['area_ft2']) + ' ft2, median pitch ' + str(hh['roof']['pitch_deg'])}")
+        pv = scene['pavement']
+        print(f"trees {len(trees)}, building candidates {len(cands)}, street source {scene['street']['source']}, pavement {pv['share'] if pv else 'none'}")
     return scene
 
 

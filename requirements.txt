@@ -2,3 +2,4 @@ numpy
 scipy
 laspy[lazrs]
 Pillow
+scikit-image

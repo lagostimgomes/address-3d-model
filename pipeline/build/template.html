@@ -62,7 +62,7 @@ button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 {
 const S=/*__DATA__*/null,GRID="__GRID__";
 document.getElementById('sub').textContent=S.sub;
-document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured house may be a neighbor':'given coordinates'}. Streets: ${S.street_source==='osm'?'OpenStreetMap':'inferred from the LiDAR (no map data)'}. Facades (windows, doors, garages, colours) are generated, not observed.`;
+document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured house may be a neighbor':'given coordinates'}. Streets: ${S.street_source==='osm'?'OpenStreetMap; paving':'paved areas'} from LiDAR intensity. Facades (windows, doors, garages, colours) are generated, not observed.`;
 /* ---------- renderer ---------- */
 const host=document.getElementById('scene');
 const renderer=new THREE.WebGLRenderer({antialias:true});
@@ -174,13 +174,20 @@ function hAt(x,z){let fx=x/DC+DN/2-.5,fz=z/DC+DN/2-.5;fx=Math.max(0,Math.min(DN-
   return g(i,j)*(1-u)*(1-v)+g(i,j+1)*u*(1-v)+g(i+1,j)*(1-u)*v+g(i+1,j+1)*u*v}
 function settle(o,p){const v=o.position.clone();if(p!==scene)p.localToWorld(v);o.position.y+=hAt(v.x,v.z)-(p===scene?0:p.position.y);return o}
 function terrain(size,seg,drop,mat){const g=new THREE.PlaneGeometry(size,size,seg,seg);g.rotateX(-Math.PI/2);const p=g.attributes.position;for(let i=0;i<p.count;i++)p.setY(i,hAt(p.getX(i),p.getZ(i))-drop);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m);return m}
-const EXT=DN*DC;terrain(EXT,DN-1,0,MAT.grass);terrain(EXT*4,120,.6,MAT.grass);
+const EXT=DN*DC;
+/* ground texture: grass, with paved areas (roads, drives, parking) measured from LiDAR return intensity */
+const GROUND=(()=>{const N=1024,c=document.createElement('canvas');c.width=c.height=N;const g=c.getContext('2d');g.fillStyle='#4f7a30';g.fillRect(0,0,N,N);
+  let sd=11;const rr=()=>(sd=(sd*16807)%2147483647)/2147483647;for(let k=0;k<9000;k++){g.fillStyle=`rgba(${rr()<.5?'255,255,200':'20,40,10'},${.04+rr()*.05})`;g.fillRect(rr()*N,rr()*N,2+rr()*6,2+rr()*6)}
+  const P=S.pavement;if(P){const n=P.n,px=N/n;g.fillStyle='#55585b';P.rle.forEach((runs,i)=>{for(let k=0;k<runs.length;k+=2)g.fillRect(runs[k]*px,i*px,runs[k+1]*px+.5,px+.5)});
+    g.globalAlpha=.25;g.filter='blur(2px)';g.drawImage(c,0,0);g.filter='none';g.globalAlpha=1}
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.anisotropy=8;return t})();
+terrain(EXT,DN-1,0,new THREE.MeshStandardMaterial({map:GROUND,roughness:1}));terrain(EXT*4,120,.6,MAT.grass);
 
 /* ---------- streets: OpenStreetMap centrelines (or a straight stand-in in front of the house) ---------- */
 const HALF={motorway:24,trunk:22,primary:20,secondary:17,tertiary:15,unclassified:13,residential:14,living_street:12,service:7};
 const FEAT=S.houses.find(h=>h.role==='featured');
 let ROADS=S.roads.slice();
-if(!ROADS.length){const f=S.front,t=[-f[1],f[0]],c=[FEAT.x+f[0]*(FEAT.d/2+42),FEAT.z+f[1]*(FEAT.d/2+42)];ROADS=[{hw:'residential',pts:[[c[0]-t[0]*400,c[1]-t[1]*400],[c[0]+t[0]*400,c[1]+t[1]*400]]}]}
+/* no map data: draw no street rather than invent one */
 const RP=[];
 function ribbon(SP,a,b,y,mat){const pos=[],idx=[],N=SP.length;SP.forEach((p,i)=>{const q=SP[Math.min(N-1,i+1)],o=SP[Math.max(0,i-1)];const tx=q.x-o.x,tz=q.z-o.z,L=Math.hypot(tx,tz)||1;const nx=tz/L,nz=-tx/L;const ax=p.x+nx*a,az=p.z+nz*a,bx=p.x+nx*b,bz=p.z+nz*b,c=hAt(p.x,p.z);
   pos.push(ax,Math.max(c,hAt(ax,az))+y,az,bx,Math.max(c,hAt(bx,bz))+y,bz);if(i)idx.push(2*i-2,2*i-1,2*i,2*i-1,2*i+1,2*i)});
@@ -222,7 +229,38 @@ function buildMassing(H){
     m.compose(new THREE.Vector3(x,top-.3,z),q,new THREE.Vector3(c+.02,.6,c+.02));cap.setMatrixAt(k,m)});
   body.userData.id=cap.userData.id=H.id;g.add(body,cap);pick.push(body,cap);
   const l=label(H.label,H.role==='featured');l.position.set(H.x,H.grade+H.ridge_h+10,H.z);g.add(l)}
+/* facet buildings: each measured roof facet is a polygon on its plane, extruded down to the ground */
+const FACADE=(()=>{const c=document.createElement('canvas');c.width=128;c.height=128;const g=c.getContext('2d');g.fillStyle='#d8cdb8';g.fillRect(0,0,128,128);
+  for(let y=0;y<128;y+=8){g.fillStyle='rgba(120,70,50,.06)';g.fillRect(0,y,128,1)}
+  g.fillStyle='#3e4a55';for(const x of[20,76])g.fillRect(x,28,32,62);g.fillStyle='#f3f1ea';for(const x of[20,76]){g.fillRect(x-3,24,38,5);g.fillRect(x-3,90,38,5);g.fillRect(x+15,28,3,62);g.fillRect(x,57,32,3)}
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=8;t.repeat.set(1/12,1/11);return t})();
+const MAT_FWALL=new THREE.MeshStandardMaterial({map:FACADE,roughness:.9,side:THREE.DoubleSide});
+const MAT_FWALL_F=new THREE.MeshStandardMaterial({map:FACADE,color:0xfff0b0,roughness:.9,side:THREE.DoubleSide});
+const MAT_SLATE=new THREE.MeshStandardMaterial({map:MAT.shingle.map,color:0x9aa0a8,roughness:.9,side:THREE.DoubleSide});
+const MAT_FLAT=new THREE.MeshStandardMaterial({color:0x6e7174,roughness:.95,side:THREE.DoubleSide});
+function buildFacets(H){
+  const g=new THREE.Group();g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;
+  const wallMat=H.role==='featured'?MAT_FWALL_F:MAT_FWALL;
+  const rp=[],rpi=[],ru=[],fp=[],fpi=[],fu=[],wp=[],wu=[];
+  const yAt=(pl,x,z)=>pl[0]*x+pl[1]*z+pl[2];
+  for(const f of H.facets){const pl=f.plane,pitched=f.pitch>8;
+    const sh=new THREE.Shape(f.outer.map(p=>new THREE.Vector2(p[0],p[1])));
+    for(const h of f.holes)sh.holes.push(new THREE.Path(h.map(p=>new THREE.Vector2(p[0],p[1]))));
+    const sg=new THREE.ShapeGeometry(sh),pos=sg.attributes.position,idx=sg.index.array;
+    const P=pitched?rp:fp,I=pitched?rpi:fpi,U=pitched?ru:fu,base=P.length/3;
+    for(let k=0;k<pos.count;k++){const x=pos.getX(k),z=pos.getY(k);P.push(x,yAt(pl,x,z)+.15,z);U.push(x,z)}
+    for(let k=0;k<idx.length;k++)I.push(base+idx[k]);
+    // walls: every ring edge from the ground up to the facet plane
+    for(const ring of[f.outer,...f.holes])for(let k=0;k<ring.length;k++){const a=ring[k],b=ring[(k+1)%ring.length];
+      const ya=yAt(pl,a[0],a[1]),yb=yAt(pl,b[0],b[1]),ga=hAt(a[0],a[1])-1.5,gb=hAt(b[0],b[1])-1.5,L=Math.hypot(b[0]-a[0],b[1]-a[1]);
+      wp.push(a[0],ga,a[1], b[0],gb,b[1], b[0],yb,b[1],  a[0],ga,a[1], b[0],yb,b[1], a[0],ya,a[1]);
+      wu.push(0,ga, L,gb, L,yb, 0,ga, L,yb, 0,ya)}}
+  const mkmesh=(pos,ind,uv,mat)=>{if(!pos.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));if(ind)geo.setIndex(ind);geo.computeVertexNormals();
+    const m=new THREE.Mesh(geo,mat);m.castShadow=m.receiveShadow=true;m.userData.id=H.id;g.add(m);pick.push(m)};
+  mkmesh(rp,rpi,ru,MAT_SLATE);mkmesh(fp,fpi,fu,MAT_FLAT);mkmesh(wp,null,wu,wallMat);
+  const l=label(H.label,H.role==='featured');l.position.set(H.x,H.grade+H.ridge_h+10,H.z);g.add(l)}
 function buildHouse(H){
+  if(H.roof.type==='facets')return buildFacets(H);
   if(H.roof.type==='massing')return buildMassing(H);
   const g=new THREE.Group();g.position.set(H.x,H.grade,H.z);g.rotation.y=H.rot;g.userData.id=H.id;scene.add(g);g.updateMatrixWorld();GROUPS[H.id]=g;
   const w=H.w,d=H.d,wh=H.wall_h,R=H.roof,SD=mk(sidingDraw(H.siding),4.67,256),st=Math.max(1,H.stories||1),fh=wh/st;
@@ -255,7 +293,7 @@ function buildHouse(H){
 S.houses.forEach(buildHouse);
 
 /* featured footprint outline */
-if(FEAT.roof.type!=='massing'){const H=FEAT,g=GROUPS[H.id],o=4,pts=[[-H.w/2-o,H.d/2+o],[H.w/2+o,H.d/2+o],[H.w/2+o,-H.d/2-o],[-H.w/2-o,-H.d/2-o],[-H.w/2-o,H.d/2+o]],a=new THREE.Vector3(),b=new THREE.Vector3();
+if(FEAT.roof.type!=='massing'&&FEAT.roof.type!=='facets'){const H=FEAT,g=GROUPS[H.id],o=4,pts=[[-H.w/2-o,H.d/2+o],[H.w/2+o,H.d/2+o],[H.w/2+o,-H.d/2-o],[-H.w/2-o,-H.d/2-o],[-H.w/2-o,H.d/2+o]],a=new THREE.Vector3(),b=new THREE.Vector3();
   for(let e=0;e<4;e++){const[x0,z0]=pts[e],[x1,z1]=pts[e+1];const n=Math.ceil(Math.hypot(x1-x0,z1-z0)/4);for(let k=0;k<n;k++){a.set(x0+(x1-x0)*k/n,0,z0+(z1-z0)*k/n);b.set(x0+(x1-x0)*(k+1)/n,0,z0+(z1-z0)*(k+1)/n);g.localToWorld(a);g.localToWorld(b);
     const m=mesh(new THREE.BoxGeometry(1,.3,a.distanceTo(b)+.3),MAT.acc,(a.x+b.x)/2,(hAt(a.x,a.z)+hAt(b.x,b.z))/2+.35,(a.z+b.z)/2,scene,false);m.rotation.y=Math.atan2(b.x-a.x,b.z-a.z)}}}
 
@@ -267,12 +305,12 @@ if(FEAT.roof.type!=='massing'){const H=FEAT,g=GROUPS[H.id],o=4,pts=[[-H.w/2-o,H.
   scene.add(crown,trunk)}}
 
 /* ---------- UI ---------- */
-const ROOFN={gable:'Gable',hip:'Hip',flat:'Flat',massing:'Complex'};
+const ROOFN={gable:'Gable',hip:'Hip',flat:'Flat',massing:'Complex',facets:'Multi-plane'};
 function show(id){const H=S.houses.find(h=>h.id===id);const tag=document.getElementById('tag');tag.textContent=H.role==='featured'?'Featured address':'Neighbor';tag.className='tag'+(H.role==='featured'?'':' n');
   document.getElementById('addr').textContent=H.role==='featured'?S.title:(H.number?`${H.number} ${H.street||S.street||''}`.trim():'Neighboring house');
-  const MS=H.roof.type==='massing';
+  const MS=H.roof.type==='massing'||H.roof.type==='facets';
   document.getElementById('stats').innerHTML=(MS?[['Height',`${Math.round(H.ridge_h)} ft`],['Roof area',`${Math.round(H.area_ft2/100)*100} ft²`],['Typical',`${Math.round(H.wall_h)} ft`],['Stories',`~${H.stories}`]]:[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
-  if(MS){document.getElementById('look').textContent=`Large building, shown as a LiDAR massing model: its measured outline and roof heights in 3 ft columns. Tallest point ${Math.round(H.ridge_h)} ft above grade.`;return}
+  if(MS){document.getElementById('look').textContent=H.roof.type==='facets'?`Rebuilt from ${H.roof.facets} measured roof planes${H.roof.pitch_deg?`, typical pitch ${Math.round(H.roof.pitch_deg)}°`:''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.`:`Large building, shown as a LiDAR massing model. Tallest point ${Math.round(H.ridge_h)} ft above grade.`;return}
   const cg=(H.roof.cross||[]).length;document.getElementById('look').textContent=`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`}
 show(FEAT.id);
 const F=S.front,FX=FEAT.x,FZ=FEAT.z;
