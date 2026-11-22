@@ -420,7 +420,7 @@ def roofgrid(c, terr, cell=2.0, zone=None):
     grade = float(np.median(terr(xs, zs)))
     slopes = [math.degrees(math.atan(math.hypot(a_, b_))) for a_, b_, _ in planes]
     counts = np.bincount(label[mask], minlength=len(planes) + 1)[1:]
-    pitched = [(sl, n_) for sl, n_ in zip(slopes, counts) if sl > 8]
+    pitched = [(sl, n_) for sl, n_ in zip(slopes, counts) if sl > 8 and n_ > 0]   # planes can lose all cells to merging
     pitch = float(np.average([p_ for p_, _ in pitched], weights=[n_ for _, n_ in pitched])) if pitched else 0.0
     eave = float(np.percentile(tops, 20) - grade); top = float(np.percentile(tops, 99.5) - grade)
     return dict(type='grid', x=round(float(xs.mean()), 2), z=round(float(zs.mean()), 2), rot=round(-ang, 4),
