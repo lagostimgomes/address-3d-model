@@ -73,8 +73,10 @@ class Planes:
         a, b, c = self.P[l]
         return a * u + b * v + c
 
+    flat_thr = FLAT
+
     def flat(self, l):
-        return math.hypot(self.P[l][0], self.P[l][1]) < FLAT
+        return math.hypot(self.P[l][0], self.P[l][1]) < self.flat_thr
 
 
 def as_polys(g):
@@ -188,7 +190,7 @@ def roof_and_walls(poly, pl, terr, cut_lines=(), parapet=True):
             else: nu_, nv_ = -gx / nl, -gy / nl
             nx_, nz_ = nu_ * pl.ca - nv_ * pl.sa, nu_ * pl.sa + nv_ * pl.ca
             A0, B0 = X(au, av, lo0), X(bu, bv, lo1)
-            ta = -nz_ * A0[0] + nx_ * A0[2]; tb = -nz_ * B0[0] + nx_ * B0[2]     # texture runs along the smoothed wall
+            ta = (-nz_ * A0[0] + nx_ * A0[2]) % 960; tb = ta + (-nz_ * (B0[0] - A0[0]) + nx_ * (B0[2] - A0[2]))     # along the smoothed wall
             steps.quad(A0, B0, X(bu, bv, hi1), X(au, av, hi0), (ta, lo0), (tb, lo1), (tb, hi1), (ta, hi0))
             steps.nrm += [round(nx_, 3), 0, round(nz_, 3)] * 6
     from scipy import ndimage
@@ -228,7 +230,7 @@ def roof_and_walls(poly, pl, terr, cut_lines=(), parapet=True):
                     tops.append((y, fl))
                 ga, gb = float(terr(*a)) - 1.5, float(terr(*b)) - 1.5
                 buf = section if is_cut else walls
-                d0 = math.hypot(a[0] - co[0][0], a[1] - co[0][1]); d1 = d0 + L / nseg
+                d0 = (math.hypot(a[0] - co[0][0], a[1] - co[0][1])) % 960; d1 = d0 + L / nseg   # 960 ft: a multiple of every texture period; keeps UVs inside int16
                 buf.quad((a[0], ga, a[1]), (b[0], gb, b[1]), (b[0], tops[1][0], b[1]), (a[0], tops[0][0], a[1]),
                          (d0, ga), (d1, gb), (d1, tops[1][0]), (d0, tops[0][0]))
                 if not is_cut:

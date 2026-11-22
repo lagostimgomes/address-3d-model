@@ -69,7 +69,7 @@ class ExpansionTests(unittest.TestCase):
             original=Path.replace
             failed=[False]
             def replace(path,target):
-                if path.name=='site.json' and path.parent.parent.name.startswith('.fetch-expansion') and not failed[0]:
+                if path.name=='site.json' and path.parent.parent.name.startswith('.fx-') and not failed[0]:
                     failed[0]=True
                     raise OSError('simulated promotion failure')
                 return original(path,target)

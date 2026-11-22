@@ -14,7 +14,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 FT = 3.28084
-NONBUILD = {2, 7, 9, 17, 18}          # ground, noise, water, bridge deck, high noise
+NONBUILD = {2, 7, 9, 17, 18}
+MAX_BLDG_FT = 1800.0                  # above every US building; noise classes 7/18 are dropped separately          # ground, noise, water, bridge deck, high noise
 rng = np.random.default_rng(7)
 
 
@@ -541,6 +542,45 @@ def house_like(c, hh):
     return (top2 >= 0.5 * tot and 8 <= hh['wall_h'] <= 26 and hh['ridge_h'] <= 42 and max(hh['w'], hh['d']) <= 80)
 
 
+SUFFIX = {'avenue': 'ave', 'av': 'ave', 'street': 'st', 'road': 'rd', 'drive': 'dr', 'boulevard': 'blvd', 'lane': 'ln',
+          'court': 'ct', 'circle': 'cir', 'place': 'pl', 'parkway': 'pkwy', 'terrace': 'ter', 'highway': 'hwy', 'square': 'sq',
+          'north': 'n', 'south': 's', 'east': 'e', 'west': 'w', 'northeast': 'ne', 'northwest': 'nw', 'southeast': 'se', 'southwest': 'sw'}
+ORD = {'first': '1st', 'second': '2nd', 'third': '3rd', 'fourth': '4th', 'fifth': '5th', 'sixth': '6th', 'seventh': '7th',
+       'eighth': '8th', 'ninth': '9th', 'tenth': '10th', 'eleventh': '11th', 'twelfth': '12th'}
+
+
+def _street_tokens(st):
+    toks = re.findall(r'[a-z0-9]+', (st or '').lower())
+    return frozenset(SUFFIX.get(ORD.get(t, t), ORD.get(t, t)) for t in toks)
+
+
+def parse_address(addr):
+    """'175 5th Ave, New York, NY 10010' -> ('175', {'5th', 'ave'})"""
+    m = re.match(r'\s*(\d+[A-Za-z]?(?:-\d+)?)\s+([^,]+)', addr or '')
+    return (m.group(1).lower(), _street_tokens(m.group(2))) if m else None
+
+
+def address_match(want, tags):
+    """House number equal (or inside a tagged range like '171-177') and the street names agree once suffixes,
+    directions and ordinals are normalised (one side may omit the suffix or direction)."""
+    if not want or not tags.get('addr:housenumber'): return False
+    num, st = want
+    hn = str(tags['addr:housenumber']).lower().replace(' ', '')
+    ok_num = False
+    for part in re.split(r'[;,]', hn):
+        r = re.match(r'(\d+)-(\d+)$', part)
+        if part == num or (r and num.isdigit() and int(r.group(1)) <= int(num) <= int(r.group(2))): ok_num = True
+    if not ok_num: return False
+    ts = _street_tokens(tags.get('addr:street'))
+    if not ts or not st: return False
+    dirs = {'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'}
+    sufx = set(SUFFIX.values()) - dirs
+    name = lambda t: t - sufx - dirs
+    if name(ts) != name(st) or not name(ts): return False
+    a, b = ts & sufx, st & sufx
+    return not (a and b) or bool(a & b)          # a suffix may be omitted on one side, but must not conflict
+
+
 def load_features(folder):
     """Mapped evidence in the model frame: features.json (schema 1, from pipeline/fetch), else the legacy
     osm_buildings.json + roads.json. Returns dict(buildings, surfaces, ways, entrances, coverage)."""
@@ -575,18 +615,25 @@ def lidar_outlines(G, x, z, H, NR, C, min_ft2=350):
     from scipy import ndimage
     from skimage import measure, morphology
     from shapely.geometry import Polygon
-    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (NR <= 1)
-    # roofs are locally planar, tree crowns are not (some surveys leave both unclassified): keep cells whose
-    # 5 x 5 neighbourhood fits a plane within 0.7 ft
-    i, j, ok = G.ij(x[m], z[m]); y = H[m] + 0.0
-    sm = np.zeros((G.R, G.C)); sc = np.zeros((G.R, G.C))
-    np.add.at(sm, (i[ok], j[ok]), y[ok]); np.add.at(sc, (i[ok], j[ok]), 1)
-    occ = sc > 0
-    hg = np.where(occ, sm / np.maximum(sc, 1), np.nan)
+    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < MAX_BLDG_FT) & (NR <= 1)
+    # roofs are locally planar, tree crowns are not (some surveys leave both unclassified). Per-cell height is the
+    # LOWEST single return, so antennas, masts and birds above a roof do not break its planarity.
+    i, j, ok = G.ij(x[m], z[m]); y = H[m]
+    hg = np.full((G.R, G.C), np.inf); np.minimum.at(hg, (i[ok], j[ok]), y[ok])
+    occ = np.isfinite(hg); hg = np.where(occ, hg, 0.0)
     GX, GZ = G.centers()
-    _a, _b, _c, res, lok = _local_planes(np.nan_to_num(hg), occ, np.asarray(GX), np.asarray(GZ))
-    M = occ & lok & (res < 0.7)
-    M = ndimage.binary_dilation(M, iterations=2) & occ      # the fit window trims roof edges: grow them back
+    _a, _b, _c, res, lok = _local_planes(hg, occ, np.asarray(GX), np.asarray(GZ))
+    seeds = occ & lok & (res < 0.7)
+    # tree cells: mostly multi-echo returns above 6 ft
+    mt = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < MAX_BLDG_FT) & (NR > 1)
+    ti, tj, tok = G.ij(x[mt], z[mt])
+    tc = np.zeros((G.R, G.C)); np.add.at(tc, (ti[tok], tj[tok]), 1)
+    sc = np.zeros((G.R, G.C)); np.add.at(sc, (i[ok], j[ok]), 1)
+    tree = tc > sc
+    # grow the planar seeds through occupied, non-tree cells: step walls between roof levels (a tower's tubes,
+    # a wing against a taller block) fail the planarity test but belong to the same building
+    M = ndimage.binary_dilation(seeds, iterations=3, mask=occ & ~tree) | seeds   # about 8 ft: bridges steps, not yards
+    M = ndimage.binary_dilation(M, iterations=1) & occ
     # close only 1-cell gaps (about 2.6 ft): houses 8-15 ft apart must stay separate buildings
     M = ndimage.binary_closing(M, iterations=1) | M
     M = ndimage.binary_opening(ndimage.binary_fill_holes(M), iterations=1)
@@ -628,7 +675,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     cov = F.get('coverage') or {}
     lb = cov.get('lidar_bounds_ft') or bounds
     dbox = sbox(max(bounds[0], lb[0]) + 2, max(bounds[2], lb[2]) + 2, min(bounds[1], lb[1]) - 2, min(bounds[3], lb[3]) - 2)
-    nonb = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260)
+    nonb = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < MAX_BLDG_FT)
     # ---- footprints: mapped polygons with LiDAR support, else LiDAR outlines
     def mkpoly(b):
         try:
@@ -655,13 +702,26 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         if mapped_union is not None and pg.intersection(mapped_union).area > 0.4 * pg.area: continue
         blds_src.append(dict(poly=pg, rec=None, support=1.0, outline='measured'))
     if not blds_src: sys.exit('no buildings found near this address (map or LiDAR)')
-    # ---- the featured building: the footprint under the address point, else the nearest with support
+    # ---- the featured building. Evidence, strongest first: a footprint whose address tags match the requested
+    # address (or fetch's target_building_id, which applies the same rule); the footprint under the address point
+    # when the locator placed it on the structure; else the footprint under / nearest to the point.
     o = Point(0, 0)
+    loc = json.load(open(os.path.join(folder, 'locate.json'))) if os.path.exists(os.path.join(folder, 'locate.json')) else {}
+    precise = loc.get('precision', 'address-point') in ('address-point', 'given')
+    want = parse_address(site.get('address', ''))
+    tagged = [b for b in blds_src if b['rec'] and address_match(want, (b['rec'].get('tags') or {}))
+              and b['poly'].distance(o) < (150 if precise else 600)]
+    tid = cov.get('target_building_id')
+    by_id = [b for b in blds_src if b['rec'] and tid and b['rec'].get('source_id') == tid and b['poly'].distance(o) < 600]
     inside = [b for b in blds_src if b['poly'].buffer(1.5).contains(o)]
-    if inside: feat = min(inside, key=lambda b: b['poly'].area)
+    feat_basis = None
+    if tagged: feat = min(tagged, key=lambda b: b['poly'].distance(o)); feat_basis = 'address tags'
+    elif by_id: feat = by_id[0]; feat_basis = 'fetch target'
+    elif inside: feat = min(inside, key=lambda b: b['poly'].area); feat_basis = 'address point'
     else:
         cand = [b for b in blds_src if b['support'] >= 0.25]
         feat = min(cand or blds_src, key=lambda b: b['poly'].distance(o))
+        feat_basis = 'nearest'
         if feat['poly'].distance(o) > 120:
             sys.exit(f"no building within 120 ft of the address point (nearest is {feat['poly'].distance(o):.0f} ft away)")
     zone = feat['poly'].buffer(buffer_ft, quad_segs=16)
@@ -759,6 +819,12 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     pave = None if has_map_ground else pavement(prim, G)
     fp = feat['poly']
     outline = [[round(x_, 1), round(z_, 1)] for x_, z_ in fp.exterior.coords[:-1]]
+    fh_ = next((h for h in blds if h['id'] == 'featured'), None)
+    if fh_ and fh_['roof']['type'] in ('gable', 'hip', 'flat') and b_outline_is_measured(feat):
+        # a measured (LiDAR) outline also takes in decks and porches; for a house, outline the measured body
+        c_, s_ = math.cos(fh_['rot']), math.sin(fh_['rot']); hw, hd = fh_['w'] / 2 + 1, fh_['d'] / 2 + 1
+        outline = [[round(fh_['x'] + lx * c_ + lz * s_, 1), round(fh_['z'] - lx * s_ + lz * c_, 1)]
+                   for lx, lz in ((-hw, -hd), (hw, -hd), (hw, hd), (-hw, hd))]
     # This analysis is the point-cloud verification that fetch's pre-selection defers to: geometric coverage is
     # decided here (fetch's pre-analysis status is kept as source_status). Map availability is reported apart.
     status = 'incomplete' if edge_touch else ('expanded' if (cov.get('expansions') or 0) > 0 else 'complete')
@@ -780,7 +846,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
                              source='mapped' if roads_xy is not None else ('lidar-intensity' if pave else 'none')),
                  site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=pave,
-                 candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
+                 featured_basis=feat_basis, candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
     json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), separators=(',', ':'))
     if verbose:
         for hh in blds:
@@ -789,8 +855,12 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                   f"{r['type']:5s} outline {pv.get('outline')} support {pv.get('lidar_support')} doors {len(hh.get('doors', []))} windows {len(hh.get('windows', []))}"
                   f"{' CLIPPED' if hh.get('clipped') else ''}")
         print(f"buildings {len(blds)}, trees {len(trees)}, street {scene['street']['source']} {street_name or ''}, "
-              f"footprints {scene['footprints']}, coverage {status} {edge_touch or ''}, maps {maps['status']}")
+              f"footprints {scene['footprints']}, coverage {status} {edge_touch or ''}, maps {maps['status']}, featured by {feat_basis}")
     return scene
+
+
+def b_outline_is_measured(b):
+    return b.get('outline') == 'measured'
 
 
 def _poly_cells(pg, G):
@@ -875,9 +945,12 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
         pu = Pp[:, 0] * ca + Pp[:, 2] * sa; pv = -Pp[:, 0] * sa + Pp[:, 2] * ca
         j = np.clip(((pu - u0) / cell).astype(int), 0, Cn - 1); i = np.clip(((pv - v0) / cell).astype(int), 0, Rn - 1)
         sg = Pp[:, 3] <= 1
-        sm = np.zeros((Rn, Cn)); sc = np.zeros((Rn, Cn))
-        np.add.at(sm, (i[sg], j[sg]), Pp[sg, 1]); np.add.at(sc, (i[sg], j[sg]), 1)
-        hgt = np.where(sc > 0, sm / np.maximum(sc, 1), np.nan)
+        hgt = np.full((Rn, Cn), np.nan)
+        if sg.any():            # median of single returns per cell: antennas and rooftop clutter do not lift the roof
+            key = i[sg] * Cn + j[sg]; ys = Pp[sg, 1]; o_ = np.lexsort((ys, key)); key, ys = key[o_], ys[o_]
+            st_ = np.r_[0, np.nonzero(np.diff(key))[0] + 1]; en_ = np.r_[st_[1:], len(key)]
+            med = ys[(st_ + en_ - 1) // 2]
+            hgt.flat[key[st_]] = med
         # cells with only multi-echo returns (roof edges under branches): the lower quartile, so canopy above
         # the roof does not lift it; cells whose value sits far off every neighbour are dropped later by the
         # median filter and plane fit
@@ -939,6 +1012,9 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
         best = np.take_along_axis(stack, cnt.argmax(0)[None], 0)[0]
     best = absorb_fragments(best, min_cells=int(math.ceil(60 / fine ** 2)))
     pl = GEO.Planes(best, planes, ang, u0, v0, fine)
+    # a mostly flat roof: low-slope planes on it are rooftop equipment, drains and crickets, not shingled roof
+    slope = np.hypot(PL[best, 0], PL[best, 1])
+    if (slope < GEO.FLAT).mean() >= 0.6: pl.flat_thr = math.tan(math.radians(18))
     meshes, profile = GEO.roof_and_walls(pg, pl, terr, cut_lines=cut_lines)
     big = area > 1800
     doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big)

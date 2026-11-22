@@ -217,8 +217,10 @@ def expand_existing(args):
     with lock.open('x',encoding='utf-8') as handle:
         handle.write(utc_now())
     try:
-        tag=uuid.uuid4().hex
-        stage_root=folder.parent/('.fetch-expansion-'+tag)
+        # Keep temporary/history paths short: long dataset names plus .bytes
+        # sidecars can otherwise exceed Windows MAX_PATH during cache copying.
+        tag=uuid.uuid4().hex[:12]
+        stage_root=folder.parent/('.fx-'+tag)
         command=[args.address,'--lat',str(old['lat']),'--lon',str(old['lon']),
                  '--bounds-ft',*[str(v) for v in request],'--expansions','1',
                  '--out-root',str(stage_root),'--user-agent',args.user_agent,

@@ -69,6 +69,8 @@ class CoverageTests(unittest.TestCase):
         self.assertAlmostEqual(d-c,spec['rows']*CELL_FT)
         self.assertEqual(grid_spec()['rows'],120)
         self.assertEqual(grid_spec(spec['bounds_ft']),spec)
+        self.assertGreaterEqual(grid_spec([0,1,0,1])['rows'],2)
+        self.assertGreaterEqual(grid_spec([0,1,0,1])['cols'],2)
 
     def test_oversized_asymmetric_target_keeps_address_in_data(self):
         a=rectangle('target',-10,3000,-10,50)

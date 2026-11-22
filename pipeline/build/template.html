@@ -65,11 +65,11 @@ button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 const S=/*__DATA__*/null,GRID="__GRID__";
 document.getElementById('sub').textContent=S.sub;
 {const G=S.ground||{ways:[],surfaces:[]},nDef=G.ways.filter(w=>w.ws==='default').length,cv=S.coverage||{};
- document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): terrain, building heights and roof planes, and trees. `+
+ document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR${S.lidar_years?` (${S.lidar_years})`:''}: terrain, building heights and roof planes, and trees. `+
   (S.houses.some(h=>(h.provenance||{}).outline==='mapped')||G.ways.length?`Mapped (OpenStreetMap): ${S.houses.some(h=>(h.provenance||{}).outline==='mapped')?'building outlines where available, ':''}${G.ways.length?'streets and paths':'no streets'}${G.surfaces.length?', parking and other surfaces':''}`+
   `${nDef?` (${nDef} of ${G.ways.length} widths are class defaults)`:''}. `:((S.maps||{}).status==='unavailable'?'Map data could not be fetched this time (the map service did not answer), so building outlines come from LiDAR and streets are not drawn. ':'No map data covers this site: building outlines come from LiDAR. '))+`Unmapped ground is shown in a neutral tone. `+
   `${S.pavement?'Paving without a map is a LiDAR-intensity estimate. ':''}`+
-  `Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured building may be a neighbor':'given coordinates'}. `+
+  `Location: ${S.featured_basis==='address tags'?'the building whose mapped address matches':S.featured_basis==='fetch target'?'the mapped building matched to the address':S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured building may be a neighbor':'given coordinates'}. `+
   `Generated, not observed: wall colours and materials unless sourced, and window layout. Doors marked "mapped" come from entrance points; others are inferred.`+
   (cv.status==='incomplete'?` Coverage incomplete: ${cv.edge_touching.length} building(s) reach the edge of the downloaded data and are shown with a hatched cut.`:'')}
 /* ---------- renderer ---------- */
@@ -394,25 +394,32 @@ function show(id){const H=S.houses.find(h=>h.id===id);const F=H.role==='featured
     :[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
   const cg=(H.roof.cross||[]).length;
   const pv=H.provenance||{},DK={mapped:'mapped entrance','inferred-path':'inferred: a mapped path ends at the wall','inferred-street':'inferred: faces the street'};
-  document.getElementById('look').textContent=G?`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; roof ${pv.heights==='measured'?`from ${H.roof.planes} measured planes`:pv.heights==='mapped'?'height from map tags (no LiDAR return)':'height unknown (generic)'}${H.clipped?'; cut at the '+((S.coverage||{}).edge_touching||[]).includes(H.id)?'data edge':'site edge':''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''} Windows are generated.`
+  document.getElementById('look').textContent=G?`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; roof ${pv.heights==='measured'?`from ${H.roof.planes} measured planes`:pv.heights==='mapped'?'height from map tags (no LiDAR return)':'height unknown (generic)'}${H.clipped?'; cut at the '+(((S.coverage||{}).edge_touching||[]).includes(H.id)?'edge of the downloaded data':'site edge'):''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''} Windows are generated.`
     :`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`;
   document.getElementById('site').textContent=`Shown: everything within ${S.buffer_ft} ft of the building — ${S.houses.length-1} other building${S.houses.length===2?'':'s'} and ${S.trees.length} trees.`}
 show(FEAT.id);
 const F=S.front,FX=FEAT.x,FZ=FEAT.z,SZ=Math.max(FEAT.w,FEAT.d),SIDE=[-F[1],F[0]];
 let fly=null;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 function goTo(p,t){fly={p0:camera.position.clone(),t0:controls.target.clone(),p1:new THREE.Vector3(...p),t1:new THREE.Vector3(...t),k:0}}
-const TGT=[FX,FEAT.grade+Math.min(FEAT.ridge_h,40)*.45,FZ];
-function overview(){const D=Math.max(150,SZ*1.25+150)*(innerWidth<600?1.3:1);return[FX+F[0]*D*.8+SIDE[0]*D*.45,FEAT.grade+D*.62,FZ+F[1]*D*.8+SIDE[1]*D*.45]}
-document.getElementById('v-street').onclick=()=>{const D=SZ/2+55,x=FX+F[0]*D+SIDE[0]*D*.25,z=FZ+F[1]*D+SIDE[1]*D*.25;goTo([x,hAt(x,z)+6,z],[FX,FEAT.grade+Math.min(FEAT.ridge_h,40)*.55,FZ])};
-document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*30,FEAT.grade+Math.max(320,SZ*2.4),FZ+F[1]*30],[FX,FEAT.grade,FZ]);
+const TGT=[FX,FEAT.grade+(FEAT.ridge_h||30)*.42,FZ];
+const TALL=FEAT.ridge_h||30;
+function overview(){const D=Math.max(150,SZ*1.25+150,TALL*1.55)*(innerWidth<600?1.3:1);return[FX+F[0]*D*.8+SIDE[0]*D*.45,FEAT.grade+Math.max(D*.62,TALL*.75),FZ+F[1]*D*.8+SIDE[1]*D*.45]}
+/* street view: stand on the nearest mapped street (else in front of the building) and look up at it */
+function streetSpot(){const G=S.ground||{ways:[]},FOOT=new Set(['footway','path','steps','cycleway','bridleway','track']);let best=null;
+  for(const w of G.ways){if(FOOT.has(w.k)||w.sv==='driveway'||w.sv==='parking_aisle')continue;for(let i=1;i<w.pts.length;i++){const[a0,b0]=w.pts[i-1],[a1,b1]=w.pts[i];
+    for(let t=0;t<=1;t+=.1){const x=a0+(a1-a0)*t,z=b0+(b1-b0)*t,d=Math.hypot(x-FX,z-FZ);if(d>SZ/2+12&&(!best||d<best[2]))best=[x,z,d]}}}
+  if(best&&best[2]<SZ/2+260)return best;const D=SZ/2+55;return[FX+F[0]*D+SIDE[0]*D*.25,FZ+F[1]*D+SIDE[1]*D*.25,D]}
+document.getElementById('v-street').onclick=()=>{const[x,z,d]=streetSpot();   // stay on the street (moving back could land inside another building)
+  goTo([x,hAt(x,z)+6,z],[FX,FEAT.grade+Math.min(TALL*.45,Math.max(12,d*.9)),FZ])};
+document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*30,FEAT.grade+Math.max(320,SZ*2.4,TALL*2.2),FZ+F[1]*30],[FX,FEAT.grade,FZ]);
 const spinB=document.getElementById('v-spin');spinB.onclick=()=>{controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=1.1;spinB.setAttribute('aria-pressed',controls.autoRotate)};
 const duskB=document.getElementById('v-dusk');
-function setDusk(on){duskB.setAttribute('aria-pressed',on);const sky=new THREE.Color(on?0x2a2540:0xdfe6ea);scene.background=sky;scene.fog=new THREE.Fog(sky,900,2600);
+function setDusk(on){duskB.setAttribute('aria-pressed',on);const sky=new THREE.Color(on?0x2a2540:0xdfe6ea);scene.background=sky;{const fn=Math.max(900,(S.houses.find(h=>h.role==='featured').ridge_h||30)*3.2);scene.fog=new THREE.Fog(sky,fn,fn*2.9)}
   hemi.intensity=on?.25:.75;hemi.color.set(on?0x8f7aa8:0xe4eef6);sun.intensity=on?.5:1.1;sun.color.set(on?0xff9a5a:0xfff1dc);sun.position.set(on?-260:-160,on?80:240,on?40:120);for(const k in winMat)winMat[k].emissiveIntensity=on?1:0;glows.forEach(o=>{if(o.material&&o.material.emissive&&!o.isMesh)o.material.emissiveIntensity=on?.9:0})}
 setDusk(document.documentElement.dataset.theme==='dark'||(!document.documentElement.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches));
 duskB.onclick=()=>setDusk(duskB.getAttribute('aria-pressed')!=='true');
 Object.assign(sun.shadow.camera,{left:-EXT/2,right:EXT/2,top:EXT/2,bottom:-EXT/2,near:10,far:1600});sun.shadow.mapSize.set(4096,4096);sun.shadow.camera.updateProjectionMatrix();
-controls.maxDistance=EXT*2.2;camera.far=6000;camera.updateProjectionMatrix();
+controls.maxDistance=Math.max(EXT*2.2,TALL*4);camera.far=6000;camera.updateProjectionMatrix();
 const ray=new THREE.Raycaster(),ptr=new THREE.Vector2();let down=null;
 renderer.domElement.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY]});
 renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const r=renderer.domElement.getBoundingClientRect();ptr.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);ray.setFromCamera(ptr,camera);const hit=ray.intersectObjects(pick)[0];if(!hit)return;let o=hit.object;while(o&&!o.userData.id)o=o.parent;

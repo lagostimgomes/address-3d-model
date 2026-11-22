@@ -95,6 +95,9 @@ def grid_spec(requested=None, cell=CELL_FT):
     if requested is not None:
         b = aligned_bounds(b, cell)
     cols, rows = round((b[1]-b[0])/cell), round((b[3]-b[2])/cell)
+    # Consumers interpolate between adjacent samples; keep at least two per axis.
+    if cols<2: b[1]+=cell*(2-cols); cols=2
+    if rows<2: b[3]+=cell*(2-rows); rows=2
     return dict(bounds_ft=b, rows=rows, cols=cols, cell_size_ft=cell)
 
 
