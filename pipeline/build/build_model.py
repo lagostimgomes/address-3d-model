@@ -60,6 +60,7 @@ def build(folder, out=None):
             if len(pts) >= 2 and hw not in ('footway', 'path', 'steps', 'cycleway', 'bridleway', 'pedestrian', 'track', 'corridor', 'proposed', 'construction'):
                 roads.append(dict(hw=hw, name=w.get('name') or (w.get('tags') or {}).get('name'), pts=[[round(p[0], 1), round(p[1], 1)] for p in pts]))
     label_neighbors(scene, folder)
+    lp = os.path.join(folder, 'locate.json'); loc = json.load(open(lp)) if os.path.exists(lp) else {}
     pad = scene['pad_ft']
     grid = ','.join(str(int(round((v - pad) * 10))) for v in dem['elevations_ft'])
     num = house_number(site['address']) or 'Home'
@@ -71,7 +72,7 @@ def build(folder, out=None):
         houses.append(dict(hh, label=lbl, siding=PALETTE[hv % len(PALETTE)], door=DOORS[(hv >> 4) % len(DOORS)],
                            garage=GARAGE[(hv >> 8) % len(GARAGE)], garage_side=1 if (hv >> 12) % 3 else -1))
     feat = next(h for h in houses if h['role'] == 'featured')
-    m = re.match(r'\s*([^,]+),\s*(.*)$', site.get('matched_address') or site['address'])
+    m = re.match(r'\s*([^,]+),\s*(.*)$', loc.get('matched_address') or site.get('matched_address') or site['address'])
     title = m.group(1).strip() if m else site['address']
     sub = m.group(2).strip() if m else ''
     years = sorted({d['year'] for d in scene['datasets'] if d['year']}, reverse=True)
@@ -79,7 +80,8 @@ def build(folder, out=None):
                 houses=houses, trees=scene['trees'], roads=roads, front=scene['street']['front'],
                 street_source=scene['street']['source'], street=street_name,
                 lidar=', '.join(f"{d['name']} ({d['year'] or 'n.d.'})" for d in scene['datasets']),
-                lidar_years=' and '.join(str(y) for y in years), dem_src=(dem.get('source') or {}).get('service_url') or (dem.get('source') or {}).get('base_url') or 'USGS 3DEP')
+                lidar_years=' and '.join(str(y) for y in years), precision=loc.get('precision', 'given'),
+                loc_source=loc.get('source', 'coordinates'), dem_src=(dem.get('source') or {}).get('service_url') or (dem.get('source') or {}).get('base_url') or 'USGS 3DEP')
     tpl = open(os.path.join(HERE, 'template.html'), encoding='utf-8').read()
     html = tpl.replace('__TITLE__', title).replace('/*__DATA__*/null', json.dumps(data, separators=(',', ':'))).replace('__GRID__', grid)
     out = out or os.path.join(folder, 'index.html')

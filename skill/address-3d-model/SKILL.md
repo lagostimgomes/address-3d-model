@@ -8,7 +8,7 @@ description: Build an interactive 3D model of a US street address (the house, on
 **Input:** one US street address.
 **Output:** a page you can orbit, showing the house, the nearest neighbor on each side, the real terrain, the street and the trees, followed by a short summary.
 
-Run the whole thing without asking questions. Ask only if there is no address, or if it is clearly outside the US. All geometry comes from public data: USGS 3DEP LiDAR and terrain, OpenStreetMap, and the Census geocoder. Never look up or show who lives at or owns the address.
+Run the whole thing without asking questions. Ask only if there is no address, or if it is clearly outside the US. All geometry comes from public data: USGS 3DEP LiDAR and terrain, the U.S. DOT National Address Database, OpenStreetMap, and the Census geocoder. Never look up or show who lives at or owns the address.
 
 ## 1. Get the pipeline (code: https://github.com/lagostimgomes/address-3d-model)
 
@@ -65,10 +65,12 @@ Write three or four sentences, without pasting the HTML:
 - the featured house's measured ridge height, roof type and pitch, and footprint
 - which neighbors were found
 - the LiDAR survey years (`RESULT.datasets`)
+- if `RESULT.location_precision` is `street`, say the address wasn't in the National Address Database, so the highlighted house is the nearest one to a street-level point and may be a neighbor; offer to move it
 - caveats: windows, doors, garages and colors are generated, not observed; the street side was inferred if `RESULT.street_source` is `inferred`; complex roofs are simplified to a main roof plus cross gables
 
 ## Notes
 
 - Model frame: feet, +x east, +z south, origin at the geocode, heights relative to the terrain at the origin.
+- If the user says the wrong house is highlighted, rerun with `--lat/--lon` of the right house (taken from scene.json's neighbor `x`/`z`, or from the user) in a new `--work` folder.
 - To refine a model on request (colors, house numbers, a porch), edit `sites/<slug>/scene.json` and rerun `"$PY" "$A/pipeline/build/build_model.py" sites/<slug>`. Don't refetch.
 - Sources to credit if asked: USGS 3DEP (public domain), © OpenStreetMap contributors (ODbL), the U.S. Census Bureau geocoder.

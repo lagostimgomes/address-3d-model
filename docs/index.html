@@ -111,7 +111,7 @@ footer{padding:36px 0 60px;border-top:1px solid var(--line);font-size:14px;color
         <div class="plan"><b>Team or Enterprise plan (work or school)</b>Only an owner of your organization can change this. Send them the list below and ask them to add it under <span class="path">Organization settings</span> → <span class="path">Capabilities</span> → <span class="path">Code execution</span>.</div>
       </div>
       <p style="margin:14px 0 4px"><b>Websites the skill uses</b> (all public, no accounts):</p>
-      <ul class="hosts" id="hosts"><li>geocoding.geo.census.gov</li><li>nominatim.openstreetmap.org</li><li>s3-us-west-2.amazonaws.com</li><li>elevation.nationalmap.gov</li><li>overpass-api.de</li><li>mdgeodata.md.gov</li></ul>
+      <ul class="hosts" id="hosts"><li>geocoding.geo.census.gov</li><li>nominatim.openstreetmap.org</li><li>s3-us-west-2.amazonaws.com</li><li>elevation.nationalmap.gov</li><li>overpass-api.de</li><li>services.arcgis.com</li><li>mdgeodata.md.gov</li></ul>
       <div class="prompt" style="margin-top:10px"><button class="copy" data-copy="hosts">Copy list</button></div>
       <p class="small">GitHub and Python packages, which the skill also uses, are usually allowed already. <a href="https://support.claude.com/en/articles/12111783-create-and-edit-files-with-claude">Claude's help page on network access</a>.</p>
     </div></li>
@@ -129,6 +129,7 @@ footer{padding:36px 0 60px;border-top:1px solid var(--line);font-size:14px;color
   <p class="intro">The shapes are measured; the details are filled in. The model page says the same.</p>
   <div class="two">
     <div class="box"><span class="tag m">Measured</span><h3>From public data</h3><ul>
+      <li>Which house is yours, from the U.S. DOT National Address Database</li>
       <li>Where each house stands and which way it faces</li>
       <li>Footprint size, wall height and roof height</li>
       <li>Roof shape (gable, hip or flat), steepness and cross gables</li>
@@ -149,8 +150,9 @@ footer{padding:36px 0 60px;border-top:1px solid var(--line);font-size:14px;color
   <details><summary>Claude says some websites are blocked</summary><div>Step 3 isn't done yet, or your organization hasn't added the websites. Claude lists the ones it couldn't reach. Turn on network access, or send that list to your organization's owner, then ask again.</div></details>
   <details><summary>Claude says there's no laser-scan data for the address</summary><div>The skill uses the U.S. Geological Survey's 3D Elevation Program, which covers most of the country but not every place yet. Very rural areas, some territories and a few cities have no data or only old data.</div></details>
   <details><summary>Only one neighbor (or none) appears</summary><div>That's normal for corner lots, houses next to an empty lot or a park, and rural homes. The skill only shows houses it actually found in the scan.</div></details>
+  <details><summary>The wrong house is highlighted</summary><div>Where the National Address Database has your address, the skill finds the exact house. Where it doesn't, it falls back to a point on the street and the model says "approximate" in its notes. Then tell Claude, for example, "it's the house to the left", and it will move the highlight.</div></details>
   <details><summary>The house faces the wrong way, or the roof looks off</summary><div>Older or sparser scans give rougher roofs, and trees over a roof can confuse it. Ask Claude to fix it in plain words, for example "the front faces the other street" or "make the roof a hip roof". It can edit the model without downloading again.</div></details>
-  <details><summary>Is my address shared with anyone?</summary><div>To find the address on a map, the skill sends it to the U.S. Census Bureau's address lookup, and if that fails, to OpenStreetMap's. The scans and maps are then downloaded by location. Nothing is looked up about who lives there. The finished model is private to your Claude account unless you share its link.</div></details>
+  <details><summary>Is my address shared with anyone?</summary><div>To find the address on a map, the skill sends it to the U.S. Census Bureau's address lookup (or OpenStreetMap's, if that fails), then looks up the house number near that spot in the U.S. DOT National Address Database. The scans and maps are then downloaded by location. Nothing is looked up about who lives there. The finished model is private to your Claude account unless you share its link.</div></details>
   <details><summary>Does it work outside the US?</summary><div>Not yet. It relies on U.S. government laser scans and terrain data.</div></details>
 </div></section>
 

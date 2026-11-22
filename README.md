@@ -21,6 +21,7 @@ python run.py "1600 Pennsylvania Ave NW, Washington, DC 20500"
 | House position, rotation, footprint | Siding colours |
 | Wall (eave) height, ridge height, roof type and pitch, cross gables | Shrubs, deck, driveway shape |
 | Tree positions and heights | |
+| Which building is the address (National Address Database point) | |
 | Streets (OpenStreetMap) and house numbers where OSM has them | |
 
 ## Use it as a Claude skill
@@ -35,6 +36,9 @@ and publishes the page.
 
 ## Pipeline
 
+0. `pipeline/locate/locate.py`: finds the house itself. It takes an approximate point from Census
+   (or Nominatim), then the matching address point from the U.S. DOT National Address Database
+   (public domain), placed on the structure or parcel. Without a match, the model is labeled approximate.
 1. `pipeline/fetch/fetch_site.py`: geocode (Census, then Nominatim), terrain grid, and LiDAR
    tiles via `fetch_lidar.py` (USGS 3DEP Entwine Point Tiles on public S3).
 2. `pipeline/osm/fetch_osm.py`: streets and building footprints from the Overpass API
@@ -48,7 +52,8 @@ and publishes the page.
 
 Needs HTTPS access to: `geocoding.geo.census.gov`, `nominatim.openstreetmap.org`,
 `raw.githubusercontent.com`, `s3-us-west-2.amazonaws.com`, `elevation.nationalmap.gov`,
-`overpass-api.de` (or `overpass.kumi.systems`, `overpass.private.coffee`) and, in Maryland,
+`overpass-api.de` (or `overpass.kumi.systems`, `overpass.private.coffee`), `services.arcgis.com`
+(U.S. DOT National Address Database) and, in Maryland,
 `mdgeodata.md.gov`. `run.py` checks them first and exits with code 3, listing the blocked hosts.
 
 ## Limits
@@ -59,7 +64,7 @@ Needs HTTPS access to: `geocoding.geo.census.gov`, `nominatim.openstreetmap.org`
   porches and turrets are not modeled.
 - Attached houses (townhouses) are treated as one building.
 
-Data: USGS 3DEP (public domain), OpenStreetMap contributors (ODbL), U.S. Census geocoder.
+Data: USGS 3DEP (public domain), U.S. DOT National Address Database (public domain), OpenStreetMap contributors (ODbL), U.S. Census geocoder.
 Built by Claude and Codex.
 
 ## License

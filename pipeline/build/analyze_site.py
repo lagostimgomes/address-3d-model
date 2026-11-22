@@ -189,7 +189,10 @@ def measure_building(P, planes, terrain, front_hint):
     roofish = [(c, I) for c, I in planes if plane_info(c)['pitch'] < 55]
     if not roofish: return None
     roofish.sort(key=lambda t: -len(t[1]))
-    mc, mI = next(((c, I) for c, I in roofish if plane_info(c)['pitch'] >= 6), roofish[0])
+    # main roof: the largest sloped plane, unless sloped planes are a minor part of the roof (then flat)
+    sloped = [(c, I) for c, I in roofish if plane_info(c)['pitch'] >= 6 and len(I) >= 25]
+    nsl = sum(len(I) for _, I in sloped); ntot = sum(len(I) for _, I in roofish)
+    mc, mI = sloped[0] if sloped and nsl >= 0.3 * ntot else roofish[0]
     md = plane_info(mc)['down']
     if md == (0.0, 0.0):
         R0 = min_rect(P[mI, 0], P[mI, 2]); md = (math.cos(R0['ang']), math.sin(R0['ang']))
@@ -215,7 +218,9 @@ def measure_building(P, planes, terrain, front_hint):
         info.append(dict(coef=c, I=I, n=len(I), pitch=pi['pitch'], ld=ld, px=px, pz=pz,
                          y2=float(np.percentile(P[I, 1], 2)), y98=float(np.percentile(P[I, 1], 98))))
     info.sort(key=lambda e: -e['n'])
-    flat = info[0]['pitch'] < 6
+    main_e = next(e for e in info if e['I'] is mI)
+    info = [main_e] + [e for e in info if e is not main_e]
+    flat = main_e['pitch'] < 6
     overhang = 1.0
     w = max(16.0, round(W - 2 * overhang, 1)); d = max(16.0, round(D - 2 * overhang, 1))
     grade = float(terrain(*to_world(0, d / 2 + 3, cx, cz, rot)))

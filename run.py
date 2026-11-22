@@ -4,7 +4,7 @@ run.py - address in, 3D neighborhood model out.
 
     python run.py "1600 Pennsylvania Ave NW, Washington, DC 20500" [--lat LAT --lon LON] [--work DIR]
 
-Steps: network preflight -> pipeline/fetch/fetch_site.py (geocode, terrain, LiDAR) -> pipeline/osm/fetch_osm.py (streets)
+Steps: network preflight -> pipeline/locate/locate.py (house point) -> pipeline/fetch/fetch_site.py (geocode, terrain, LiDAR) -> pipeline/osm/fetch_osm.py (streets)
 -> pipeline/build/analyze_site.py (houses, roofs, trees) -> pipeline/build/build_model.py (index.html).
 Prints one JSON line at the end starting with RESULT: {...}.
 Exit codes: 0 ok, 2 bad input, 3 network blocked, 4 fetch failed, 5 analysis failed, 6 build failed.
@@ -20,6 +20,7 @@ HOSTS = [
     ('s3-us-west-2.amazonaws.com', 'https://s3-us-west-2.amazonaws.com/usgs-lidar-public/MD_Western_2_D21/ept.json', True),
     ('elevation.nationalmap.gov', 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer?f=json', True),
     ('overpass-api.de', 'https://overpass-api.de/api/status', False),
+    ('services.arcgis.com', 'https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/Address_Points_from_National_Address_Database_view/FeatureServer/0?f=json', False),
 ]
 
 
@@ -81,6 +82,17 @@ def main():
     else:
         work = os.path.abspath(a.work)
     py = sys.executable
+    # locate the house itself (National Address Database point), not just the street
+    loc = None
+    if a.lat is None:
+        print('\n== locate', flush=True)
+        sys.path.insert(0, os.path.join(ROOT, 'pipeline', 'locate'))
+        from locate import locate
+        loc = locate(a.address)
+        print(json.dumps({k: v for k, v in loc.items() if k != 'log'}), flush=True)
+        if loc.get('ok'): a.lat, a.lon = loc['lat'], loc['lon']
+        else:
+            print('RESULT: ' + json.dumps({'ok': False, 'stage': 'locate', 'error': loc.get('error'), 'log': loc.get('log')})); sys.exit(4)
     fetch = [py, os.path.join(ROOT, 'pipeline', 'fetch', 'fetch_site.py'), a.address, '--out-root', work]
     if a.lat is not None: fetch += ['--lat', str(a.lat), '--lon', str(a.lon)]
     print(f'\n== fetch: {" ".join(fetch)}', flush=True)
@@ -94,6 +106,7 @@ def main():
         folder = os.path.join(work, slug)
         fetch[fetch.index('--out-root') + 1] = work
         step(fetch, 4, 'fetch (retry)')
+    if loc: json.dump(loc, open(os.path.join(folder, 'locate.json'), 'w'), indent=1)
     print('\n== osm (streets and footprints; optional)', flush=True)
     subprocess.run([py, os.path.join(ROOT, 'pipeline', 'osm', 'fetch_osm.py'), folder])
     step([py, os.path.join(ROOT, 'pipeline', 'build', 'analyze_site.py'), folder], 5, 'analyze')
@@ -101,7 +114,8 @@ def main():
     scene = json.load(open(os.path.join(folder, 'scene.json')))
     site = json.load(open(os.path.join(folder, 'site.json')))
     summary = dict(ok=True, html=os.path.join(folder, 'index.html'), folder=folder, address=site['address'],
-                   matched_address=site.get('matched_address'), geocoder=(site.get('geocoder') or {}).get('name'),
+                   matched_address=(loc or {}).get('matched_address') or site.get('matched_address'),
+                   location_source=(loc or {}).get('source', 'coordinates'), location_precision=(loc or {}).get('precision', 'given'),
                    lat=site['lat'], lon=site['lon'], street_source=scene['street']['source'],
                    datasets=[f"{d['name']} ({d['year']})" for d in scene['datasets']],
                    houses=[{k: h.get(k) for k in ('id', 'role', 'w', 'd', 'wall_h', 'ridge_h', 'stories')} | {'roof': h['roof']['type'], 'pitch': h['roof'].get('pitch_deg')} for h in scene['houses']],

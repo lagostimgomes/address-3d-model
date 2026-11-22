@@ -62,7 +62,7 @@ button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 {
 const S=/*__DATA__*/null,GRID="__GRID__";
 document.getElementById('sub').textContent=S.sub;
-document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Streets: ${S.street_source==='osm'?'OpenStreetMap':'approximate (no map data)'}. Facades (windows, doors, garages, colours) are generated, not observed.`;
+document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured house may be a neighbor':'given coordinates'}. Streets: ${S.street_source==='osm'?'OpenStreetMap':'inferred from the LiDAR (no map data)'}. Facades (windows, doors, garages, colours) are generated, not observed.`;
 /* ---------- renderer ---------- */
 const host=document.getElementById('scene');
 const renderer=new THREE.WebGLRenderer({antialias:true});
@@ -266,7 +266,7 @@ const F=S.front,FX=FEAT.x,FZ=FEAT.z;
 let fly=null;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 function goTo(p,t){fly={p0:camera.position.clone(),t0:controls.target.clone(),p1:new THREE.Vector3(...p),t1:new THREE.Vector3(...t),k:0}}
 const fy=hAt(FX+F[0]*(FEAT.d/2+45),FZ+F[1]*(FEAT.d/2+45));
-document.getElementById('v-street').onclick=()=>goTo([FX+F[0]*(FEAT.d/2+46)+F[1]*12,fy+6,FZ+F[1]*(FEAT.d/2+46)-F[0]*12],[FX,FEAT.grade+12,FZ]);
+document.getElementById('v-street').onclick=()=>goTo([FX+F[0]*(FEAT.d/2+46+SZ*.4)+F[1]*12,fy+6,FZ+F[1]*(FEAT.d/2+46+SZ*.4)-F[0]*12],[FX,FEAT.grade+12,FZ]);
 document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*40,320,FZ+F[1]*40],[FX,0,FZ]);
 const spinB=document.getElementById('v-spin');spinB.onclick=()=>{controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=1.1;spinB.setAttribute('aria-pressed',controls.autoRotate)};
 const duskB=document.getElementById('v-dusk');
@@ -280,8 +280,8 @@ renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clie
   if(o){show(o.userData.id);const f=new THREE.Vector3(0,0,95);o.localToWorld(f);goTo([f.x+20,o.position.y+24,f.z],[o.position.x,o.position.y+12,o.position.z])}});
 function resize(){const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.fov=w<600?58:45;camera.updateProjectionMatrix()}
 const ro=new ResizeObserver(resize);ro.observe(host);resize();
-const D0=innerWidth<600?175:135;camera.position.set(FX+F[0]*D0-F[1]*60,FEAT.grade+110,FZ+F[1]*D0+F[0]*60);controls.target.set(FX,FEAT.grade+10,FZ);
-goTo([FX+F[0]*D0*.85-F[1]*45,FEAT.grade+62,FZ+F[1]*D0*.85+F[0]*45],[FX,FEAT.grade+8,FZ]);
+const SZ=Math.max(FEAT.w,FEAT.d),D0=(innerWidth<600?175:135)*Math.max(1,SZ/45);camera.position.set(FX+F[0]*D0-F[1]*60,FEAT.grade+110,FZ+F[1]*D0+F[0]*60);controls.target.set(FX,FEAT.grade+10,FZ);
+goTo([FX+F[0]*D0*.85-F[1]*45,FEAT.grade+62*Math.max(1,SZ/45),FZ+F[1]*D0*.85+F[0]*45],[FX,FEAT.grade+8,FZ]);
 window.__cam=(p,t)=>{fly=null;camera.position.set(...p);controls.target.set(...t);controls.update()};window.__S=S;
 renderer.setAnimationLoop(()=>{if(fly){fly.k=reduce?1:Math.min(1,fly.k+.022);const e=1-Math.pow(1-fly.k,3);camera.position.lerpVectors(fly.p0,fly.p1,e);controls.target.lerpVectors(fly.t0,fly.t1,e);if(fly.k>=1)fly=null}controls.update();renderer.render(scene,camera)});
 }
