@@ -67,7 +67,7 @@ class FetchTests(unittest.TestCase):
 
     def test_nonzero_cli_when_lidar_step_fails(self):
         with tempfile.TemporaryDirectory() as folder:
-            args = ['A US address', '--lat', '39', '--lon', '-77', '--out-root', folder]
+            args = ['A US address', '--lat', '39', '--lon', '-77', '--out-root', folder, '--no-features']
             with patch.object(fetch, 'fetch_dem'), patch.object(fetch, 'run_lidar', side_effect=ValueError('bad dataset')):
                 self.assertEqual(fetch.main(args), 1)
             site = json.loads((Path(folder) / 'a-us-address' / 'site.json').read_text())

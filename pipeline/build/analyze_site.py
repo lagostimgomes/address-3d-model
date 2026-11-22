@@ -759,16 +759,22 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     pave = None if has_map_ground else pavement(prim, G)
     fp = feat['poly']
     outline = [[round(x_, 1), round(z_, 1)] for x_, z_ in fp.exterior.coords[:-1]]
-    status = 'incomplete' if edge_touch else (cov.get('status') or 'complete')
-    coverage = dict(status=status, edge_touching=edge_touch, section_cuts=cut_ids, data_bounds_ft=[round(v, 1) for v in dbox.bounds],
-                    source_status=cov.get('status'))
+    # This analysis is the point-cloud verification that fetch's pre-selection defers to: geometric coverage is
+    # decided here (fetch's pre-analysis status is kept as source_status). Map availability is reported apart.
+    status = 'incomplete' if edge_touch else ('expanded' if (cov.get('expansions') or 0) > 0 else 'complete')
+    xb0, zb0, xb1, zb1 = dbox.bounds
+    coverage = dict(status=status, edge_touching=edge_touch, section_cuts=cut_ids,
+                    data_bounds_ft=[round(xb0, 1), round(xb1, 1), round(zb0, 1), round(zb1, 1)],
+                    source_status=cov.get('status'), expansions=cov.get('expansions') or 0)
+    fs = F.get('status')
+    maps = dict(status=fs or ('ok' if (F.get('buildings') or F.get('ways')) else 'none'), error=F.get('error'))
     if edge_touch:
         want = unary_union([zone] + [b['poly'] for b in inc if b['poly'].area <= whole_max_ft2 or b is feat]).buffer(30).bounds
         coverage['wanted_bounds_ft'] = [round(want[0], 1), round(want[2], 1), round(want[1], 1), round(want[3], 1)]
     front = front_of(fp)
     scene = dict(schema_version=3, address=site['address'], matched_address=site.get('matched_address'),
                  lat=site['lat'], lon=site['lon'], pad_ft=round(terr.pad, 2), buffer_ft=buffer_ft,
-                 dem_bounds_ft=bounds, coverage=coverage,
+                 dem_bounds_ft=bounds, coverage=coverage, maps=maps,
                  datasets=[dict(name=d['name'], year=d['year'], points=int(d['n']), z_offset_ft=round(d['offset_ft'], 2),
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
@@ -783,7 +789,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                   f"{r['type']:5s} outline {pv.get('outline')} support {pv.get('lidar_support')} doors {len(hh.get('doors', []))} windows {len(hh.get('windows', []))}"
                   f"{' CLIPPED' if hh.get('clipped') else ''}")
         print(f"buildings {len(blds)}, trees {len(trees)}, street {scene['street']['source']} {street_name or ''}, "
-              f"footprints {scene['footprints']}, coverage {status} {edge_touch or ''}")
+              f"footprints {scene['footprints']}, coverage {status} {edge_touch or ''}, maps {maps['status']}")
     return scene
 
 

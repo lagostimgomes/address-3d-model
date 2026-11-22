@@ -69,6 +69,7 @@ def main():
     ap.add_argument('--lat', type=float); ap.add_argument('--lon', type=float)
     ap.add_argument('--work', default=os.path.join(os.getcwd(), 'sites'))
     ap.add_argument('--skip-preflight', action='store_true')
+    ap.add_argument('--osm-raw-json', help='replay a saved Overpass response (reproducible runs; no live map query)')
     a = ap.parse_args()
     if (a.lat is None) != (a.lon is None):
         print('RESULT: ' + json.dumps({'ok': False, 'stage': 'input', 'error': '--lat and --lon go together'})); sys.exit(2)
@@ -105,6 +106,7 @@ def main():
             print('RESULT: ' + json.dumps({'ok': False, 'stage': 'locate', 'error': loc.get('error'), 'log': loc.get('log')})); sys.exit(4)
     fetch = [py, os.path.join(ROOT, 'pipeline', 'fetch', 'fetch_site.py'), a.address, '--out-root', work]
     if a.lat is not None: fetch += ['--lat', str(a.lat), '--lon', str(a.lon)]
+    if a.osm_raw_json: fetch += ['--osm-raw-json', os.path.abspath(a.osm_raw_json)]
     print(f'\n== fetch: {" ".join(fetch)}', flush=True)
     if subprocess.run(fetch).returncode != 0:
         # USGS and Census services fail transiently (502/503); one clean retry in a fresh folder
