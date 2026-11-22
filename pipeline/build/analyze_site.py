@@ -302,13 +302,18 @@ def _local_planes(hgt, mask, GX, GZ, win=5):
     return a, b, c, np.sqrt(np.clip(res, 0, None)), ok
 
 
-def facets(c, terr, front_vec, cell=2.5):
-    """Complex or large building: segment the roof into planar facets by region growing on a height
-    raster, each facet a polygon with its plane. Rendered as prisms from the ground up to the plane."""
+def roofgrid(c, terr, cell=2.0, zone=None):
+    """Any building that is not a simple house: segment the roof into planes by region growing on a
+    height raster aligned with the building's main axis, and return the labelled grid. The page builds
+    one continuous roof surface from it (each cell on its plane), with walls on the outline and at height
+    steps, so ridges are sharp and there are no cracks. zone(x, z) -> bool clips very large buildings."""
     from scipy import ndimage
     from skimage import measure, morphology
     from collections import deque
     Pw = c['P']
+    if zone is not None:
+        keep = zone(Pw[:, 0], Pw[:, 2])
+        if keep.sum() >= 30: Pw = Pw[keep]
     # raster aligned with the building's main axis, so walls come out straight and corners square
     ang = c['rect']['ang']; ca, sa = math.cos(ang), math.sin(ang)
     P = np.c_[Pw[:, 0] * ca + Pw[:, 2] * sa, Pw[:, 1], -Pw[:, 0] * sa + Pw[:, 2] * ca]
@@ -387,79 +392,44 @@ def facets(c, terr, front_vec, cell=2.5):
             best = min(cand, key=fit)
             if fit(best) < 3.0 or n < 8: label[R] = best; changed = True
         if not changed: break
-    out = []
-    for k in np.unique(label[label > 0]):
-        reg, nreg = ndimage.label(label == k)
-        for r in range(1, nreg + 1):
-            R = reg == r
-            if R.sum() < 3: continue
-            pad = np.pad(R, 1).astype(float)
-            rings = []
-            for cnt_ in measure.find_contours(pad, 0.5):
-                cnt_ = measure.approximate_polygon(cnt_, tolerance=0.6)
-                if len(cnt_) < 4: continue
-                uv = [(x0 + (q[1] - 1 + .5) * cell, z0 + (q[0] - 1 + .5) * cell) for q in cnt_[:-1]]
-                pts = [[round(u * ca - v * sa, 2), round(u * sa + v * ca, 2)] for u, v in uv]
-                area = 0.5 * abs(sum(a_[0] * b_[1] - b_[0] * a_[1] for a_, b_ in zip(pts, pts[1:] + pts[:1])))
-                if area >= 6: rings.append((area, pts))
-            if not rings: continue
-            rings.sort(key=lambda t: -t[0])
-            pa, pb, pc = planes[k - 1]
-            pa, pb = pa * ca - pb * sa, pa * sa + pb * ca        # y = a u + b v + c  ->  world x, z
-            out.append(dict(outer=rings[0][1], holes=[r_[1] for r_ in rings[1:]], plane=[round(pa, 5), round(pb, 5), round(pc, 3)],
-                            pitch=round(math.degrees(math.atan(math.hypot(pa, pb))), 1)))
+    # upsample x2 with a smoothed outline, so angled walls step in 1 ft, not 2-2.5 ft
+    f_ = 2
+    lab_up = np.kron(label, np.ones((f_, f_), int))
+    m_up = ndimage.gaussian_filter(np.kron(mask.astype(float), np.ones((f_, f_))), sigma=f_ * 0.9) > 0.5
+    if (m_up & (lab_up == 0)).any():
+        idx_ = ndimage.distance_transform_edt(lab_up == 0, return_distances=False, return_indices=True)
+        lab_up = np.where(m_up, lab_up[tuple(idx_)], 0)
+    else:
+        lab_up = np.where(m_up, lab_up, 0)
+    fine = cell / f_
+    # run-length rows of plane labels; planes stay in the building's (u, v) frame
+    label_out, shape_out = lab_up, lab_up.shape
+    rows = []
+    for r in range(shape_out[0]):
+        lab_r = label_out[r]; runs = []; k = 0
+        while k < shape_out[1]:
+            if lab_r[k] > 0:
+                s0, L = k, lab_r[k]
+                while k < shape_out[1] and lab_r[k] == L: k += 1
+                runs += [int(s0), int(k - s0), int(L - 1)]
+            else: k += 1
+        rows.append(runs)
     us, vs = GX[mask], GZ[mask]
     xs, zs = us * ca - vs * sa, us * sa + vs * ca
-    tops = hgt[mask]
+    tops = np.array([planes[l - 1][0] * u + planes[l - 1][1] * v + planes[l - 1][2] for u, v, l in zip(us, vs, label[mask])])
     grade = float(np.median(terr(xs, zs)))
-    area = float(mask.sum() * cell * cell)
-    pitched = [f for f in out if f['pitch'] > 8]
-    return dict(type='facets', x=round(float(xs.mean()), 2), z=round(float(zs.mean()), 2),
-                rot=round(math.atan2(front_vec[0], front_vec[1]), 4), grade=round(grade, 2),
-                w=round(float(xs.max() - xs.min() + cell), 1), d=round(float(zs.max() - zs.min() + cell), 1),
-                wall_h=round(float(np.percentile(tops, 25) - grade), 1), eave_h=round(float(np.percentile(tops, 25) - grade), 1),
-                ridge_h=round(float(np.percentile(tops, 99) - grade), 1), area_ft2=round(area),
-                stories=max(1, int(round((np.percentile(tops, 25) - grade) / 11))),
-                roof=dict(type='facets', pitch_deg=round(float(np.median([f['pitch'] for f in pitched])), 1) if pitched else 0,
-                          facets=len(out)), facets=out)
-
-
-def massing(c, terr, front_vec, cell=3.0):
-    """Large or complex building: its measured shape as columns on a 3 ft grid (top = 95th pct height)."""
-    from scipy import ndimage
-    P = c['P']
-    x0, z0 = float(P[:, 0].min()) - cell, float(P[:, 2].min()) - cell
-    j = ((P[:, 0] - x0) / cell).astype(int); i = ((P[:, 2] - z0) / cell).astype(int)
-    G = np.full((i.max() + 2, j.max() + 2), np.nan)
-    order = np.lexsort((P[:, 1], i, j))
-    for a, b, yv in zip(i[order], j[order], P[order, 1]):
-        G[a, b] = yv if np.isnan(G[a, b]) else max(G[a, b], yv)
-    occ = ~np.isnan(G)
-    filled = ndimage.binary_closing(occ, iterations=1) | occ
-    filled = ndimage.binary_fill_holes(filled)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        med = ndimage.generic_filter(np.where(occ, G, np.nan), np.nanmedian, size=3, mode='constant', cval=np.nan)
-    top = np.where(np.isnan(med), G, med)                       # 3x3 median smooths edge hits and rooftop clutter
-    top = np.where(np.isnan(top), np.nanmedian(G), top)
-    top = np.round(top * 2) / 2
-    cells = []
-    for a, b in zip(*np.nonzero(filled)):
-        cells.append([int(a), int(b), int(round(float(top[a, b]) * 10))])
-    xs = x0 + (np.nonzero(filled)[1] + .5) * cell; zs = z0 + (np.nonzero(filled)[0] + .5) * cell
-    cx, cz = float(xs.mean()), float(zs.mean())
-    tops = np.array([t for _, _, t in cells]) / 10
-    grade = float(np.median(terr(xs, zs)))
-    rot = math.atan2(front_vec[0], front_vec[1])
-    area = len(cells) * cell * cell
-    return dict(type='massing', x=round(cx, 2), z=round(cz, 2), rot=round(rot, 4), grade=round(grade, 2),
-                w=round(float(xs.max() - xs.min() + cell), 1), d=round(float(zs.max() - zs.min() + cell), 1),
-                wall_h=round(float(np.median(tops) - grade), 1), ridge_h=round(float(tops.max() - grade), 1),
-                eave_h=round(float(np.median(tops) - grade), 1), area_ft2=round(area),
-                stories=max(1, int(round((np.median(tops) - grade) / 12))),
-                roof=dict(type='massing', pitch_deg=0),
-                grid=dict(x0=round(x0, 2), z0=round(z0, 2), cell=cell, cells=cells))
+    slopes = [math.degrees(math.atan(math.hypot(a_, b_))) for a_, b_, _ in planes]
+    counts = np.bincount(label[mask], minlength=len(planes) + 1)[1:]
+    pitched = [(sl, n_) for sl, n_ in zip(slopes, counts) if sl > 8]
+    pitch = float(np.average([p_ for p_, _ in pitched], weights=[n_ for _, n_ in pitched])) if pitched else 0.0
+    eave = float(np.percentile(tops, 20) - grade); top = float(np.percentile(tops, 99.5) - grade)
+    return dict(type='grid', x=round(float(xs.mean()), 2), z=round(float(zs.mean()), 2), rot=round(-ang, 4),
+                grade=round(grade, 2), w=round(float(np.ptp(us) + cell), 1), d=round(float(np.ptp(vs) + cell), 1),
+                wall_h=round(eave, 1), eave_h=round(eave, 1), ridge_h=round(top, 1), area_ft2=round(float(mask.sum() * cell * cell)),
+                stories=max(1, int(round(eave / 11))),
+                roof=dict(type='grid', pitch_deg=round(pitch, 1), planes=len(planes)),
+                grid=dict(ang=round(ang, 6), x0=round(x0, 3), z0=round(z0, 3), cell=fine, rows=rows,
+                          planes=[[round(a_, 5), round(b_, 5), round(c_, 3)] for a_, b_, c_ in planes]))
 
 
 def pavement(prim, extent, n=240):
@@ -505,18 +475,67 @@ def pavement(prim, extent, n=240):
     return dict(n=n, extent=round(extent, 3), rle=rle, share=round(float(dark.mean()), 3))
 
 
-def analyze(folder, verbose=True):
+class Grid:
+    """The terrain square as an n x n raster (rows north to south), for the site zone and pavement."""
+    def __init__(self, extent, n=240):
+        self.n, self.extent, self.c = n, extent, extent / n
+
+    def ij(self, x, z):
+        j = np.floor(np.asarray(x) / self.c + self.n / 2).astype(int); i = np.floor(np.asarray(z) / self.c + self.n / 2).astype(int)
+        return i, j, (i >= 0) & (j >= 0) & (i < self.n) & (j < self.n)
+
+    def raster(self, x, z):
+        i, j, ok = self.ij(x, z); M = np.zeros((self.n, self.n), bool); M[i[ok], j[ok]] = True; return M
+
+    def lookup(self, M, x, z):
+        i, j, ok = self.ij(x, z); out = np.zeros(len(np.atleast_1d(x)), bool)
+        out[ok] = M[i[ok], j[ok]]; return out
+
+    def xz(self, i, j):
+        return (np.asarray(j) + .5 - self.n / 2) * self.c, (np.asarray(i) + .5 - self.n / 2) * self.c
+
+
+def rle(M):
+    rows = []
+    for row in M:
+        runs = []; k = 0; n = len(row)
+        while k < n:
+            if row[k]:
+                s0 = k
+                while k < n and row[k]: k += 1
+                runs += [int(s0), int(k - s0)]
+            else: k += 1
+        rows.append(runs)
+    return rows
+
+
+def house_like(c, hh):
+    """A simple detached house: small footprint, a dominant main roof pair, house-range heights."""
+    if hh is None or c['rect']['area'] > 3500: return False
+    if hh['roof']['type'] == 'flat': return False
+    roof = [J for cf, J in c['planes'] if plane_info(cf)['pitch'] < 55]
+    tot = sum(len(J) for J in roof); top2 = sum(sorted((len(J) for J in roof), reverse=True)[:2])
+    return (top2 >= 0.5 * tot and 8 <= hh['wall_h'] <= 26 and hh['ridge_h'] <= 42 and max(hh['w'], hh['d']) <= 80)
+
+
+def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
+    """Site rule: the building under the address point, plus every building and ground feature that
+    touches the zone within buffer_ft of its footprint. Touching buildings are kept whole up to
+    whole_max_ft2 of roof, larger ones are clipped to the zone."""
+    from scipy import ndimage
     site, E, cell, roads = load_site(folder)
     terr = Terrain(E, cell)
     D = load_lidar(folder, site, terr)
     prim = D[0]
+    extent = E.shape[0] * cell; G = Grid(extent); half = extent / 2 - 3
     X = np.concatenate([d['x'] for d in D]); Y = np.concatenate([d['y'] for d in D]); Z = np.concatenate([d['z'] for d in D])
     C = np.concatenate([d['cls'] for d in D]); H = np.concatenate([d['hag'] for d in D])
     NR = np.concatenate([d['nret'] for d in D])
     S = np.concatenate([np.full(d['n'], i) for i, d in enumerate(D)])
+    pave = pavement(prim, extent)
     # roofs return one echo; tree canopy returns several. Keep single returns for building detection.
-    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (np.abs(X) < 260) & (np.abs(Z) < 260) & (NR <= 1)
-    x, y, z, h, s = X[m], Y[m], Z[m], H[m], S[m]
+    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (np.abs(X) < half) & (np.abs(Z) < half) & (NR <= 1)
+    x, y, z = X[m], Y[m], Z[m]
     lab, n = clusters(x, z, cell=3.0, dilate=0)
     polys = road_polylines(roads)
     cands = []
@@ -525,122 +544,128 @@ def analyze(folder, verbose=True):
         if len(I) < 60: continue
         P = np.c_[x[I], y[I], z[I]]
         planes = ransac_planes(P)
-        roof = [(c, J) for c, J in planes if plane_info(c)['pitch'] < 55]
+        roof = [(cf, J) for cf, J in planes if plane_info(cf)['pitch'] < 55]
         nroof = sum(len(J) for _, J in roof)
         if not roof or nroof < 50: continue
         J = np.concatenate([J for _, J in roof])
         R = min_rect(P[J, 0], P[J, 2])
-        frac = nroof / len(I)
-        big = max(len(J) for _, J in roof)
-        # trees give many small noisy planes; roofs give a few large ones
-        if R['area'] < 350 or big < 35: continue
+        frac = nroof / len(I); big = max(len(J) for _, J in roof)
+        if R['area'] < 350 or big < 35: continue            # trees: many small noisy planes
         if frac < 0.35 and big / len(I) < 0.2: continue
-        cands.append(dict(I=I, P=P, planes=planes, rect=R, frac=frac, n=len(I), large=R['area'] > 15000,
-                          d0=float(np.hypot(P[:, 0], P[:, 2]).min())))
+        cands.append(dict(I=I, P=P, planes=planes, rect=R, n=len(I), d0=float(np.hypot(P[:, 0], P[:, 2]).min())))
     if not cands: sys.exit('no buildings found in the LiDAR near this address')
-    # featured: building containing / nearest the geocode
-    # the building the address point falls on (or the nearest one's closest roof point)
     feat = min(cands, key=lambda c: c['d0'])
     if feat['d0'] > 120:
         sys.exit(f'no building within 120 ft of the address point (nearest roof is {feat["d0"]:.0f} ft away); '
                  'the geocode may be off, or the LiDAR predates the building')
+    # footprints on the site grid
+    def footprint(c):
+        M = G.raster(c['P'][:, 0], c['P'][:, 2])
+        M = ndimage.binary_closing(M, iterations=2) | M
+        return ndimage.binary_fill_holes(M)
+    for c in cands: c['fp'] = footprint(c); c['area'] = float(c['fp'].sum() * G.c ** 2)
+    zone = ndimage.distance_transform_edt(~feat['fp']) * G.c <= buffer_ft
+    inc = [c for c in cands if (c['fp'] & zone).any()]
+    # where is the street? OSM centreline if we have it, else the nearest LiDAR pavement
+    pave_mask = None
+    if pave:
+        pave_mask = np.zeros((pave['n'], pave['n']), bool)
+        for i_, runs in enumerate(pave['rle']):
+            for k in range(0, len(runs), 2): pave_mask[i_, runs[k]:runs[k] + runs[k + 1]] = True
+        big_p = morphology_label_keep_large(pave_mask, G, min_ft2=1500)
+        pidx = ndimage.distance_transform_edt(~big_p, return_distances=False, return_indices=True) if big_p.any() else None
+    def street_dir(pt):
+        if polys:
+            q = nearest_road(np.array(pt), polys)
+            if q: return (q[1] - pt) / (np.hypot(*(q[1] - pt)) or 1), q[3].get('name') if q[3] else None
+        if pave_mask is not None and pidx is not None:
+            i, j, ok = G.ij([pt[0]], [pt[1]])
+            if ok[0]:
+                pi, pj = pidx[0][i[0], j[0]], pidx[1][i[0], j[0]]
+                qx, qz = G.xz(pi, pj); v = np.array([qx - pt[0], qz - pt[1]])
+                if np.hypot(*v) > 1: return v / np.hypot(*v), None
+        return np.array([0.0, 1.0]), None
     fpt = np.array([feat['rect']['cx'], feat['rect']['cz']])
-    nr = nearest_road(fpt, polys) if polys else None
-    if nr:
-        front = (nr[1] - fpt) / (np.hypot(*(nr[1] - fpt)) or 1); tangent = nr[2]
-    else:
-        # fallback: houses line up along the street, so take the street direction from the row of
-        # nearby buildings, then pick the side with less vegetation (front yards + street are open)
-        cen = np.array([[c['rect']['cx'], c['rect']['cz']] for c in cands])
-        dd = np.hypot(*(cen - fpt).T); near = cen[np.argsort(dd)[:5]]
-        if len(near) >= 3:
-            q = near - near.mean(0); tang = np.linalg.svd(q, full_matrices=False)[2][0]
-        else:
-            tang = np.array([math.cos(feat['rect']['ang']), math.sin(feat['rect']['ang'])])
-        nrm = np.array([-tang[1], tang[0]])
-        veg = (~np.isin(prim['cls'], [2, 7, 9, 17, 18])) & (prim['hag'] > 3) & (prim['nret'] > 1)   # canopy, not roofs
-        q = np.c_[prim['x'][veg] - fpt[0], prim['z'][veg] - fpt[1]]
-        best = None
-        for sgn in (1, -1):
-            dv = nrm * sgn; along = q @ dv; across = q @ tang
-            sc = int(((along > 30) & (along < 90) & (np.abs(across) < 60)).sum())
-            if best is None or sc < best[0]: best = (sc, dv)
-        front = best[1]; tangent = tang
-
-    def mk(c, front_vec):
-        res = None if c['large'] else measure_building(c['P'], c['planes'], terr, front_vec)
-        if res:
-            hh = res[0]
-            # a house-style fit that is out of house range falls back to massing
-            if 8 <= hh['wall_h'] <= 40 and hh['ridge_h'] <= 60 and max(hh['w'], hh['d']) <= 130: return hh
-        return facets(c, terr, front_vec)
-    houses = []
-    fh = mk(feat, front)
-    if not fh: sys.exit('could not fit a roof to the featured building')
-    fh.update(id='featured', role='featured'); houses.append(fh)
-    # neighbours: same side of the street, nearest along the street on each side
-    side0 = None
-    if nr: side0 = np.sign((fpt - nr[1]) @ front * -1)
-    picks = {}
-    for c in cands:
-        if c is feat: continue
-        p = np.array([c['rect']['cx'], c['rect']['cz']]); dv = p - fpt
-        if fh['roof']['type'] in ('facets', 'massing'): dv_min = c['d0']
-        dist = float(np.hypot(*dv))
-        if dist < 25 or dist > 260: continue
-        t = float(dv @ tangent); off = float(dv @ front)
-        campus = fh['roof']['type'] in ('facets', 'massing')   # big buildings: nearest neighbours in any direction
-        if not campus and abs(off) > max(45, abs(t) * 0.8): continue      # across the street or behind
-        if nr and not campus:
-            q = nearest_road(p, polys)
-            if q and q[0] > 1.8 * nr[0] + 40: continue
-        key = 'right' if t > 0 else 'left'
-        if campus: key = f'near{len(picks)}'; picks[key] = (dist, c); continue
-        if key not in picks or dist < picks[key][0]: picks[key] = (dist, c)
-    if fh['roof']['type'] in ('facets', 'massing'):
-        near = sorted(picks.values(), key=lambda v: v[0])[:2]
-        picks = {('left', 'right')[k]: v for k, v in enumerate(near)}
-    for key, (dist, c) in picks.items():
-        p = np.array([c['rect']['cx'], c['rect']['cz']])
-        q = nearest_road(p, polys) if polys else None
-        fv = (q[1] - p) / (np.hypot(*(q[1] - p)) or 1) if q else front
-        hh = mk(c, fv)
-        if hh: hh.update(id=key, role='neighbor'); houses.append(hh)
-    # trees: primary dataset, non-building points, local maxima on a 10 ft grid
+    front, street_name = street_dir(fpt)
+    blds = []
+    for c in inc:
+        is_feat = c is feat
+        clip = (not is_feat) and c['area'] > whole_max_ft2
+        cpt = np.array([c['rect']['cx'], c['rect']['cz']])
+        hh = None
+        if not clip and c['area'] <= 3500:
+            fv, _ = street_dir(cpt)
+            res = measure_building(c['P'], c['planes'], terr, fv)
+            hh = res[0] if res else None
+            if not house_like(c, hh): hh = None
+        if hh is None:
+            zf = (lambda xx, zz: G.lookup(zone, xx, zz)) if clip else None
+            hh = roofgrid(c, terr, cell=2.0 if c['area'] < 12000 else 2.5, zone=zf)
+            hh['clipped'] = bool(clip)
+        hh.update(id='featured' if is_feat else f'b{len(blds)}', role='featured' if is_feat else 'context')
+        blds.append(hh)
+    blds.sort(key=lambda h: h['role'] != 'featured')
+    # final site = zone plus the whole footprints of included buildings (with a little yard)
+    site_m = zone.copy()
+    for c in inc:
+        if c['area'] <= whole_max_ft2 or c is feat: site_m |= c['fp']
+    site_m = ndimage.binary_dilation(site_m, iterations=2)
+    site_m = ndimage.binary_fill_holes(ndimage.binary_closing(site_m, iterations=3))
+    # trees: canopy peaks (primary dataset) inside the site, not on included roofs
+    roofs = np.zeros_like(site_m)
+    for c in inc: roofs |= ndimage.binary_dilation(c['fp'], iterations=2)
+    tm = (S == 0) & (~np.isin(C, list(NONBUILD))) & (H > 12) & (H < 140) & (NR > 1)
+    tm &= G.lookup(site_m, X, Z) & ~G.lookup(roofs, X, Z)
     trees = []
-    tm = (S == 0) & (~np.isin(C, list(NONBUILD))) & (H > 12) & (H < 110) & (np.abs(X) < 320) & (np.abs(Z) < 320)
-    for hh in houses + [dict(x=c['rect']['cx'], z=c['rect']['cz'], w=c['rect']['lu'], d=c['rect']['lv']) for c in cands]:
-        r = max(hh['w'], hh['d']) / 2 + 3
-        tm &= (X - hh['x']) ** 2 + (Z - hh['z']) ** 2 > r * r
     if tm.any():
         tx, tz, th = X[tm], Z[tm], H[tm]
         gi = np.floor(tx / 10).astype(int); gj = np.floor(tz / 10).astype(int)
         best = {}
-        for a, b, hh, xx, zz in zip(gi, gj, th, tx, tz):
-            k = (a, b)
-            if k not in best or hh > best[k][0]: best[k] = (hh, xx, zz, 1 + (best.get(k, (0, 0, 0, 0))[3]))
-            else: best[k] = (best[k][0], best[k][1], best[k][2], best[k][3] + 1)
-        cellv = sorted(best.values(), key=lambda v: -v[0])
-        for hh, xx, zz, cnt in cellv:
+        for a_, b_, hh_, xx, zz in zip(gi, gj, th, tx, tz):
+            k_ = (a_, b_); cur = best.get(k_)
+            if cur is None or hh_ > cur[0]: best[k_] = (hh_, xx, zz, (cur[3] if cur else 0) + 1)
+            else: best[k_] = (cur[0], cur[1], cur[2], cur[3] + 1)
+        for hh_, xx, zz, cnt in sorted(best.values(), key=lambda v: -v[0]):
             if cnt < 3: continue
             if any((xx - t['x']) ** 2 + (zz - t['z']) ** 2 < 14 ** 2 for t in trees): continue
-            trees.append(dict(x=round(float(xx), 1), z=round(float(zz), 1), h=round(float(min(hh, 95)), 1)))
-            if len(trees) >= 450: break
-    scene = dict(schema_version=1, address=site['address'], matched_address=site.get('matched_address'),
-                 lat=site['lat'], lon=site['lon'], pad_ft=round(terr.pad, 2),
+            trees.append(dict(x=round(float(xx), 1), z=round(float(zz), 1), h=round(float(min(hh_, 120)), 1)))
+            if len(trees) >= 500: break
+    # featured outline (for the yellow line on the ground)
+    from skimage import measure
+    outline = []
+    fo = np.pad(ndimage.binary_dilation(feat['fp'], iterations=2), 1).astype(float)
+    cs = measure.find_contours(fo, 0.5)
+    if cs:
+        cnt = measure.approximate_polygon(max(cs, key=len), tolerance=0.8)
+        ox, oz = G.xz(cnt[:, 0] - 1 - .5 + .5, cnt[:, 1] - 1 - .5 + .5)
+        outline = [[round(float(a_), 1), round(float(b_), 1)] for a_, b_ in zip(ox, oz)]
+    scene = dict(schema_version=2, address=site['address'], matched_address=site.get('matched_address'),
+                 lat=site['lat'], lon=site['lon'], pad_ft=round(terr.pad, 2), buffer_ft=buffer_ft,
                  datasets=[dict(name=d['name'], year=d['year'], points=int(d['n']), z_offset_ft=round(d['offset_ft'], 2),
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
-                 street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], tangent=[round(float(tangent[0]), 4), round(float(tangent[1]), 4)],
-                             name=(nr[3].get('name') if nr else None), source='osm' if nr else 'inferred'),
-                 houses=houses, trees=trees, candidates=len(cands),
-                 pavement=pavement(prim, E.shape[0] * cell))
-    json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), indent=1)
+                 street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
+                             source='osm' if polys else ('pavement' if pave else 'none')),
+                 site=dict(n=G.n, extent=round(extent, 3), rle=rle(site_m)),
+                 outline=outline, houses=blds, trees=trees, pavement=pave, candidates=len(cands))
+    json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), separators=(',', ':'))
     if verbose:
-        for hh in houses:
-            print(f"{hh['id']:9s} at ({hh['x']:7.1f},{hh['z']:7.1f}) rot {hh['rot']:+.3f}  {hh['w']}x{hh['d']} ft  wall {hh['wall_h']}  ridge {hh['ridge_h']}  roof {hh['roof'] if hh['roof']['type'] != 'facets' else 'facets: ' + str(hh['roof']['facets']) + ', ' + str(hh['area_ft2']) + ' ft2, median pitch ' + str(hh['roof']['pitch_deg'])}")
-        pv = scene['pavement']
-        print(f"trees {len(trees)}, building candidates {len(cands)}, street source {scene['street']['source']}, pavement {pv['share'] if pv else 'none'}")
+        for hh in blds:
+            r = hh['roof']
+            desc = (f"grid {r['planes']} planes, pitch {r['pitch_deg']}, {hh['area_ft2']} ft2{' clipped' if hh.get('clipped') else ''}"
+                    if r['type'] == 'grid' else f"{r['type']} pitch {r.get('pitch_deg')} cross {len(r.get('cross', []))}")
+            print(f"{hh['id']:9s} ({hh['x']:7.1f},{hh['z']:7.1f}) {hh['w']}x{hh['d']}  eave {hh['wall_h']}  top {hh['ridge_h']}  {desc}")
+        print(f"buildings {len(blds)}, trees {len(trees)}, street {scene['street']['source']} {street_name or ''}, "
+              f"site {site_m.mean() * extent ** 2:.0f} ft2, pavement {pave['share'] if pave else 'none'}")
     return scene
+
+
+def morphology_label_keep_large(M, G, min_ft2):
+    from scipy import ndimage
+    L, n = ndimage.label(M)
+    if n == 0: return M
+    sizes = ndimage.sum(M, L, range(1, n + 1)) * G.c ** 2
+    keep = np.isin(L, [k + 1 for k, s_ in enumerate(sizes) if s_ >= min_ft2])
+    return keep
 
 
 if __name__ == '__main__':

@@ -53,6 +53,8 @@ button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
     <button id="v-spin" aria-pressed="false">Spin</button>
     <button id="v-dusk" aria-pressed="false">Dusk</button>
   </div>
+  <p class="look" id="facts"></p>
+  <p class="note" id="site"></p>
   <p class="note" id="note"></p>
 </section>
 
@@ -62,7 +64,7 @@ button:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 {
 const S=/*__DATA__*/null,GRID="__GRID__";
 document.getElementById('sub').textContent=S.sub;
-document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): ground, house positions, footprints, wall heights, roof shapes and pitches, and tree positions and heights. Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured house may be a neighbor':'given coordinates'}. Streets: ${S.street_source==='osm'?'OpenStreetMap; paving':'paved areas'} from LiDAR intensity. Facades (windows, doors, garages, colours) are generated, not observed.`;
+document.getElementById('note').textContent=`Measured from USGS 3DEP LiDAR (${S.lidar_years}): terrain, paving, building outlines, heights and roof planes, and trees. Location: ${S.precision==='address-point'?'National Address Database point':S.precision==='street'?'approximate (street-level geocode), so the featured house may be a neighbor':'given coordinates'}. Streets: ${S.street_source==='osm'?'OpenStreetMap; paving':'paved areas'} from LiDAR intensity. Wall materials, windows and doors are generated, not observed.`;
 /* ---------- renderer ---------- */
 const host=document.getElementById('scene');
 const renderer=new THREE.WebGLRenderer({antialias:true});
@@ -173,40 +175,106 @@ const DN=S.n,DC=S.cell,DEM=Float32Array.from(GRID.split(','),v=>v/10);
 function hAt(x,z){let fx=x/DC+DN/2-.5,fz=z/DC+DN/2-.5;fx=Math.max(0,Math.min(DN-1.001,fx));fz=Math.max(0,Math.min(DN-1.001,fz));const i=Math.floor(fz),j=Math.floor(fx),u=fx-j,v=fz-i,g=(r,c)=>DEM[r*DN+c];
   return g(i,j)*(1-u)*(1-v)+g(i,j+1)*u*(1-v)+g(i+1,j)*(1-u)*v+g(i+1,j+1)*u*v}
 function settle(o,p){const v=o.position.clone();if(p!==scene)p.localToWorld(v);o.position.y+=hAt(v.x,v.z)-(p===scene?0:p.position.y);return o}
-function terrain(size,seg,drop,mat){const g=new THREE.PlaneGeometry(size,size,seg,seg);g.rotateX(-Math.PI/2);const p=g.attributes.position;for(let i=0;i<p.count;i++)p.setY(i,hAt(p.getX(i),p.getZ(i))-drop);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m);return m}
 const EXT=DN*DC;
+
+/* ---------- the site: everything within 100 ft of the building's footprint ---------- */
+const SITE=(()=>{const n=S.site.n,M=new Uint8Array(n*n);S.site.rle.forEach((runs,i)=>{for(let k=0;k<runs.length;k+=2)M.fill(1,i*n+runs[k],i*n+runs[k]+runs[k+1])});return{n,c:S.site.extent/n,M}})();
+const inSite=(x,z)=>{const i=Math.floor(z/SITE.c+SITE.n/2),j=Math.floor(x/SITE.c+SITE.n/2);return i>=0&&j>=0&&i<SITE.n&&j<SITE.n&&SITE.M[i*SITE.n+j]===1};
+
 /* ground texture: grass, with paved areas (roads, drives, parking) measured from LiDAR return intensity */
-const GROUND=(()=>{const N=1024,c=document.createElement('canvas');c.width=c.height=N;const g=c.getContext('2d');g.fillStyle='#4f7a30';g.fillRect(0,0,N,N);
+const GROUND=(()=>{const N=1024,c=document.createElement('canvas');c.width=c.height=N;const g=c.getContext('2d');g.fillStyle='#557f34';g.fillRect(0,0,N,N);
   let sd=11;const rr=()=>(sd=(sd*16807)%2147483647)/2147483647;for(let k=0;k<9000;k++){g.fillStyle=`rgba(${rr()<.5?'255,255,200':'20,40,10'},${.04+rr()*.05})`;g.fillRect(rr()*N,rr()*N,2+rr()*6,2+rr()*6)}
-  const P=S.pavement;if(P){const n=P.n,px=N/n;g.fillStyle='#55585b';P.rle.forEach((runs,i)=>{for(let k=0;k<runs.length;k+=2)g.fillRect(runs[k]*px,i*px,runs[k+1]*px+.5,px+.5)});
+  const P=S.pavement;if(P){const n=P.n,px=N/n;g.fillStyle='#5a5d60';P.rle.forEach((runs,i)=>{for(let k=0;k<runs.length;k+=2)g.fillRect(runs[k]*px,i*px,runs[k+1]*px+.5,px+.5)});
     g.globalAlpha=.25;g.filter='blur(2px)';g.drawImage(c,0,0);g.filter='none';g.globalAlpha=1}
   const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.anisotropy=8;return t})();
-terrain(EXT,DN-1,0,new THREE.MeshStandardMaterial({map:GROUND,roughness:1}));terrain(EXT*4,120,.6,MAT.grass);
+let BASE=0;
+{ // terrain clipped to the site, with a soil edge down to a base, like an architect's site model
+  const n=SITE.n,c=SITE.c,V=(n+1)*(n+1),H=new Float32Array(V);let lo=1e9;
+  for(let i=0;i<=n;i++)for(let j=0;j<=n;j++){const x=(j-n/2)*c,z=(i-n/2)*c;H[i*(n+1)+j]=hAt(x,z)}
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++)if(SITE.M[i*n+j])lo=Math.min(lo,H[i*(n+1)+j]);
+  BASE=lo-10;const pos=[],uv=[],sp=[],sn=[];
+  const P=(i,j)=>[(j-n/2)*c,H[i*(n+1)+j],(i-n/2)*c],U=(x,z)=>[x/EXT+.5,.5-z/EXT];
+  const tri=(a,b,d)=>{for(const p of[a,b,d]){pos.push(...p);uv.push(...U(p[0],p[2]))}};
+  const has=(i,j)=>i>=0&&j>=0&&i<n&&j<n&&SITE.M[i*n+j]===1;
+  const skirt=(a,b)=>{sp.push(a[0],a[1],a[2], b[0],b[1],b[2], b[0],BASE,b[2], a[0],a[1],a[2], b[0],BASE,b[2], a[0],BASE,a[2])};
+  for(let i=0;i<n;i++)for(let j=0;j<n;j++){if(!has(i,j))continue;const a=P(i,j),b=P(i+1,j),d=P(i,j+1),e=P(i+1,j+1);tri(a,b,d);tri(d,b,e);
+    if(!has(i-1,j))skirt(d,a);if(!has(i+1,j))skirt(b,e);if(!has(i,j-1))skirt(a,b);if(!has(i,j+1))skirt(e,d)}
+  const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));geo.computeVertexNormals();
+  const ground=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({map:GROUND,roughness:1}));ground.receiveShadow=true;scene.add(ground);
+  const sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));sg.computeVertexNormals();
+  scene.add(new THREE.Mesh(sg,new THREE.MeshStandardMaterial({color:0x7a5b3e,roughness:1,side:THREE.DoubleSide})));
+  const table=new THREE.Mesh(new THREE.CircleGeometry(EXT*3,64),new THREE.MeshStandardMaterial({color:0xe6e2d8,roughness:1}));table.rotation.x=-Math.PI/2;table.position.y=BASE-.05;table.receiveShadow=true;scene.add(table)}
 
-/* ---------- streets: OpenStreetMap centrelines (or a straight stand-in in front of the house) ---------- */
+/* ---------- streets: OpenStreetMap centrelines, clipped to the site ---------- */
 const HALF={motorway:24,trunk:22,primary:20,secondary:17,tertiary:15,unclassified:13,residential:14,living_street:12,service:7};
 const FEAT=S.houses.find(h=>h.role==='featured');
-let ROADS=S.roads.slice();
-/* no map data: draw no street rather than invent one */
-const RP=[];
-function ribbon(SP,a,b,y,mat){const pos=[],idx=[],N=SP.length;SP.forEach((p,i)=>{const q=SP[Math.min(N-1,i+1)],o=SP[Math.max(0,i-1)];const tx=q.x-o.x,tz=q.z-o.z,L=Math.hypot(tx,tz)||1;const nx=tz/L,nz=-tx/L;const ax=p.x+nx*a,az=p.z+nz*a,bx=p.x+nx*b,bz=p.z+nz*b,c=hAt(p.x,p.z);
+function ribbon(SP,a,b,y,mat){if(SP.length<2)return;const pos=[],idx=[],N=SP.length;SP.forEach((p,i)=>{const q=SP[Math.min(N-1,i+1)],o=SP[Math.max(0,i-1)];const tx=q.x-o.x,tz=q.z-o.z,L=Math.hypot(tx,tz)||1;const nx=tz/L,nz=-tx/L;const ax=p.x+nx*a,az=p.z+nz*a,bx=p.x+nx*b,bz=p.z+nz*b,c=hAt(p.x,p.z);
   pos.push(ax,Math.max(c,hAt(ax,az))+y,az,bx,Math.max(c,hAt(bx,bz))+y,bz);if(i)idx.push(2*i-2,2*i-1,2*i,2*i-1,2*i+1,2*i)});
-  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setIndex(idx);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m);return m}
-for(const r of ROADS){const pts=[];for(const p of r.pts){const v=new THREE.Vector3(p[0],0,p[1]);if(!pts.length||pts[pts.length-1].distanceTo(v)>1)pts.push(v)}if(pts.length<2)continue;
-  const cv=new THREE.CatmullRomCurve3(pts),L=cv.getLength(),SP=cv.getSpacedPoints(Math.max(8,Math.round(L/3)));const hw=HALF[r.hw]||12;
-  for(const p of SP)RP.push(p);ribbon(SP,-hw,hw,.12,MAT.asphalt);
-  if(hw>=12&&hw<=17){ribbon(SP,hw,hw+.9,.5,MAT.conc);ribbon(SP,-hw-.9,-hw,.5,MAT.conc);ribbon(SP,hw+4.5,hw+8.5,.2,MAT.conc);ribbon(SP,-hw-8.5,-hw-4.5,.2,MAT.conc)}}
-const roadDist=(x,z)=>{let m=1e9;for(const p of RP){const d=(p.x-x)**2+(p.z-z)**2;if(d<m)m=d}return Math.sqrt(m)};
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setIndex(idx);g.computeVertexNormals();const m=new THREE.Mesh(g,mat);m.receiveShadow=true;scene.add(m)}
+for(const r of S.roads){const pts=[];for(const p of r.pts){const v=new THREE.Vector3(p[0],0,p[1]);if(!pts.length||pts[pts.length-1].distanceTo(v)>1)pts.push(v)}if(pts.length<2)continue;
+  const cv=new THREE.CatmullRomCurve3(pts),L=cv.getLength(),all=cv.getSpacedPoints(Math.max(8,Math.round(L/3)));const hw=HALF[r.hw]||12;
+  let run=[];const flush=()=>{if(run.length>2){ribbon(run,-hw,hw,.14,MAT.asphalt);if(hw>=12&&hw<=17){ribbon(run,hw,hw+.9,.5,MAT.conc);ribbon(run,-hw-.9,-hw,.5,MAT.conc)}}run=[]};
+  for(const p of all){if(inSite(p.x,p.z)&&inSite(p.x+3,p.z)&&inSite(p.x-3,p.z)&&inSite(p.x,p.z+3)&&inSite(p.x,p.z-3))run.push(p);else flush()}flush()}
 
-/* ---------- house parts ---------- */
-function driveway(g,x0,x1,front){const v=new THREE.Vector3();let L=0;for(;L<160;L+=.5){v.set((x0+x1)/2,0,front+L);g.localToWorld(v);if(roadDist(v.x,v.z)<15.2)break}
-  if(L>=160)return 0;const pos=[],idx=[],N=16;for(let k=0;k<=N;k++){const zz=front+L*k/N;for(const xx of[x0,x1]){v.set(xx,0,zz);g.localToWorld(v);pos.push(xx,hAt(v.x,v.z)+.2-g.position.y,zz)}if(k)idx.push(2*k-2,2*k,2*k-1,2*k-1,2*k,2*k+1)}
-  const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setIndex(idx);geo.computeVertexNormals();const m=new THREE.Mesh(geo,MAT.drive);m.receiveShadow=true;g.add(m);return L}
+/* ---------- walls: brick, stone or buff, with floors and windows at real scale ---------- */
+const WALLS=['#8f4e3b','#a0614a','#7c4433','#cfc5b2','#d8c9a3','#bdb8ae','#e2dccd'];
+const facadeCache={};
+function facadeMat(col,floorH=12,style='punched'){const key=col+floorH+style;if(facadeCache[key])return facadeCache[key];const c=document.createElement('canvas');c.width=c.height=128;const g=c.getContext('2d');
+  g.fillStyle=col;g.fillRect(0,0,128,128);const brick=parseInt(col.slice(1,3),16)>parseInt(col.slice(5,7),16)+30;
+  if(brick)for(let y=0;y<128;y+=4){g.fillStyle='rgba(255,255,255,.07)';g.fillRect(0,y,128,1)}else for(let y=0;y<128;y+=16){g.fillStyle='rgba(0,0,0,.05)';g.fillRect(0,y,128,1)}
+  g.fillStyle='rgba(0,0,0,.18)';g.fillRect(0,122,128,6);
+  if(style==='ribbon'){g.fillStyle='#3d4d5a';g.fillRect(0,36,128,50);g.fillStyle='rgba(255,255,255,.18)';for(let x=0;x<128;x+=16)g.fillRect(x,36,2,50)}
+  else for(const x of[18,74]){g.fillStyle='#eeeae0';g.fillRect(x-4,26,44,64);g.fillStyle='#34404b';g.fillRect(x,30,36,56);g.fillStyle='#eeeae0';g.fillRect(x+17,30,2,56);g.fillRect(x,57,36,2);g.fillRect(x,42,36,1.5);g.fillRect(x,72,36,1.5)}
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=8;t.repeat.set(1/11,1/floorH);
+  return facadeCache[key]=new THREE.MeshStandardMaterial({map:t,roughness:.9,side:THREE.DoubleSide})}
+const roofCache={};
+const lin=c=>new THREE.Color(c).convertSRGBToLinear();   // hex colours are sRGB; the renderer works in linear light
+function roofMat(col,flat){const key=(col||'')+flat;if(roofCache[key])return roofCache[key];
+  return roofCache[key]=flat?new THREE.MeshStandardMaterial({color:lin(col||'#4f5255'),roughness:.95,side:THREE.DoubleSide})
+    :new THREE.MeshStandardMaterial({map:MAT.shingle.map,color:col?new THREE.Color(col).lerp(new THREE.Color(0xffffff),.45):0xb4b8be,roughness:.9,side:THREE.DoubleSide})}
+const MAT_SLATE=new THREE.MeshStandardMaterial({map:MAT.shingle.map,color:0xb4b8be,roughness:.9,side:THREE.DoubleSide});
+const MAT_FLAT=new THREE.MeshStandardMaterial({color:0x55585b,roughness:.95,side:THREE.DoubleSide});
+const MAT_TRIM=new THREE.MeshStandardMaterial({color:new THREE.Color(0xd9d6cf).convertSRGBToLinear(),roughness:.8,side:THREE.DoubleSide});
+
+/* ---------- any building that isn't a simple house: one continuous roof from its measured planes ---------- */
+const pick=[],GROUPS={};
+function buildGrid(H,wallCol){
+  const G=H.grid,c=G.cell,ca=Math.cos(G.ang),sa=Math.sin(G.ang),R=G.rows.length,PL=G.planes;
+  const W=G.rows.reduce((m,r)=>{for(let k=0;k<r.length;k+=3)m=Math.max(m,r[k]+r[k+1]);return m},0)+2;
+  const L=new Int16Array(R*W).fill(-1);G.rows.forEach((r,i)=>{for(let k=0;k<r.length;k+=3)L.fill(r[k+2],i*W+r[k],i*W+r[k]+r[k+1])});
+  const lab=(i,j)=>(i<0||j<0||i>=R||j>=W)?-1:L[i*W+j];
+  const yP=(l,u,v)=>PL[l][0]*u+PL[l][1]*v+PL[l][2];
+  const X=(u,v)=>u*ca-v*sa,Z=(u,v)=>u*sa+v*ca;
+  const roofP=[],roofU=[],flatP=[],flatU=[],wallP=[],wallU=[],trimP=[];
+  const quad=(arr,uv,a,b,d,e,ua,ub,ud,ue)=>{arr.push(...a,...b,...d,...d,...b,...e);if(uv)uv.push(...ua,...ub,...ud,...ud,...ub,...ue)};
+  for(let i=0;i<R;i++)for(let j=0;j<W;j++){const l=lab(i,j);if(l<0)continue;
+    const u0=G.x0+j*c,v0=G.z0+i*c,u1=u0+c,v1=v0+c;
+    const pitched=Math.hypot(PL[l][0],PL[l][1])>.15,A=pitched?roofP:flatP,AU=pitched?roofU:flatU;
+    const pt=(u,v)=>[X(u,v),yP(l,u,v),Z(u,v)];
+    quad(A,AU,pt(u0,v0),pt(u0,v1),pt(u1,v0),pt(u1,v1),[u0,v0],[u0,v1],[u1,v0],[u1,v1]);
+    // the four edges: outer wall to the ground, or a step wall where this cell stands above its neighbour
+    const edges=[[i-1,j,u0,v0,u1,v0],[i+1,j,u1,v1,u0,v1],[i,j-1,u0,v1,u0,v0],[i,j+1,u1,v0,u1,v1]];
+    for(const[ni,nj,ua,va,ub,vb]of edges){const m=lab(ni,nj);const ta=yP(l,ua,va),tb=yP(l,ub,vb);
+      let ba,bb,outer=m<0;
+      if(outer){ba=hAt(X(ua,va),Z(ua,va))-1.5;bb=hAt(X(ub,vb),Z(ub,vb))-1.5}
+      else{if(m===l)continue;ba=yP(m,ua,va);bb=yP(m,ub,vb);if(ta<=ba+.1&&tb<=bb+.1)continue;ba=Math.min(ba,ta);bb=Math.min(bb,tb)}
+      const tall=Math.max(ta-ba,tb-bb)>3.5,len=c,horiz=(va===vb)?ua:va,horizB=(va===vb)?ub:vb;
+      const a=[X(ua,va),ba,Z(ua,va)],b=[X(ub,vb),bb,Z(ub,vb)],d=[X(ua,va),ta,Z(ua,va)],e=[X(ub,vb),tb,Z(ub,vb)];
+      const gy=H.grade-1.5;if(tall||outer)quad(wallP,wallU,a,b,d,e,[horiz,ba-gy],[horizB,bb-gy],[horiz,ta-gy],[horizB,tb-gy]);
+      else quad(A,AU,a,b,d,e,[horiz,ba],[horizB,bb],[horiz,ta],[horizB,tb]);
+      if(outer)quad(trimP,null,[X(ua,va),ta-.7,Z(ua,va)],[X(ub,vb),tb-.7,Z(ub,vb)],[X(ua,va),ta+.05,Z(ua,va)],[X(ub,vb),tb+.05,Z(ub,vb)])}}
+  const g=new THREE.Group();g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;
+  const mesh=(p,u,mat)=>{if(!p.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(p,3));if(u)geo.setAttribute('uv',new THREE.Float32BufferAttribute(u,2));geo.computeVertexNormals();
+    const m=new THREE.Mesh(geo,mat);m.castShadow=m.receiveShadow=true;m.userData.id=H.id;g.add(m);pick.push(m)};
+  mesh(roofP,roofU,roofMat(H.roof_color,false));mesh(flatP,flatU,roofMat(H.roof_flat_color||'#4f5255',true));mesh(wallP,wallU,facadeMat(wallCol,H.floor_h||12,H.facade_style||'punched'));mesh(trimP,null,MAT_TRIM);
+  if(H.role==='featured'){const l=label(H.label,true);l.position.set(H.x,H.grade+H.ridge_h+12,H.z);g.add(l)}}
+
+/* ---------- simple houses: parametric walls, gable/hip roof and cross gables measured from LiDAR ---------- */
 function basement(g,w,d,mat){wall(g,w,40,d,0,-20,0,mat,mat);const v=new THREE.Vector3(0,0,-d/2-4);g.localToWorld(v);const r=hAt(v.x,v.z)-g.position.y;
   if(r<-5){const y=r+4.2;win(g,-w/4,y,-d/2,{ry:Math.PI});box(6,7,.3,MAT.trim,w/5,r+3.6,-d/2-.1,g,false);mesh(new THREE.PlaneGeometry(5.4,6.6),winMat[false],w/5,r+3.6,-d/2-.3,g,false).rotation.y=Math.PI}return r}
 function deck(g,x,z,w,d){box(w,1,d,MAT.deck,x,1.2,z,g);box(w,3,.3,MAT.trim,x,3.2,z-d/2,g,false);for(const sx of[-1,1]){const v=new THREE.Vector3(x+sx*(w/2-.6),0,z-d/2+.6);g.localToWorld(v);const gr=hAt(v.x,v.z)-g.position.y;const hgt=Math.max(.5,1.2-gr);box(.7,hgt,.7,MAT.deck,x+sx*(w/2-.6),1.2-hgt/2,z-d/2+.6,g)}}
-function hipRoof(p,w,d,h,base,o=1.2){const W=w/2+o,D=d/2+o,lx=w>=d,r=Math.max(0,(lx?W-D:D-W));const s=h/((lx?D:W));const H=(lx?D:W)*s;
-  const A=[-W,0,-D],B=[W,0,-D],C=[W,0,D],Dd=[-W,0,D],R1=lx?[-r,H,0]:[0,H,-r],R2=lx?[r,H,0]:[0,H,r];
+function hipRoof(p,w,d,h,base,o=1.2){const W=w/2+o,D=d/2+o,lx=w>=d,r=Math.max(0,(lx?W-D:D-W));const s=h/((lx?D:W));const Hh=(lx?D:W)*s;
+  const A=[-W,0,-D],B=[W,0,-D],C=[W,0,D],Dd=[-W,0,D],R1=lx?[-r,Hh,0]:[0,Hh,-r],R2=lx?[r,Hh,0]:[0,Hh,r];
   const tris=lx?[[Dd,C,R2],[Dd,R2,R1],[B,A,R1],[B,R1,R2],[A,Dd,R1],[C,B,R2]]:[[Dd,C,R2],[A,Dd,R2],[A,R2,R1],[C,B,R1],[C,R1,R2],[B,A,R1]];
   const pos=[],uv=[];for(const t of tris)for(const v of t){pos.push(...v);uv.push(v[0],v[2]+v[1])}
   const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.computeVertexNormals();
@@ -215,124 +283,82 @@ function roofBand(g,w,d,y,x=0,z=0){box(w+1.2,.9,d+1.2,MAT.trim,x,y,z,g,false)}
 function corners(g,w,d,h){for(const sx of[-1,1])for(const sz of[-1,1])box(.6,h,.6,MAT.trim,sx*(w/2),h/2,sz*(d/2),g,false)}
 function label(text,featured){const c=document.createElement('canvas');c.width=256;c.height=100;const g=c.getContext('2d');g.fillStyle=featured?'#ffe600':'#ffffff';g.beginPath();g.roundRect?g.roundRect(8,8,240,70,14):g.rect(8,8,240,70);g.fill();g.beginPath();g.moveTo(112,78);g.lineTo(128,96);g.lineTo(144,78);g.fill();g.fillStyle='#151515';
   let fs=44;g.font=`700 ${fs}px "Hanken Grotesk",system-ui,sans-serif`;while(g.measureText(text).width>220&&fs>20){fs-=2;g.font=`700 ${fs}px "Hanken Grotesk",system-ui,sans-serif`}g.textAlign='center';g.textBaseline='middle';g.fillText(text,128,45);
-  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false}));s.scale.set(20,7.8,1);s.renderOrder=9;return s}
-
-/* ---------- houses: footprint, walls, roof and cross gables measured from LiDAR; facade generated ---------- */
-const pick=[],GROUPS={};
-function buildMassing(H){
-  const G=H.grid,c=G.cell,N=G.cells.length,g=new THREE.Group();g.position.set(0,0,0);g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;
-  const body=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshStandardMaterial({color:H.role==='featured'?0xd9cdb4:0xc9c5bc,roughness:.85}),N);
-  const cap=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshStandardMaterial({color:0x5b5f63,roughness:.9}),N);
-  body.castShadow=body.receiveShadow=cap.castShadow=cap.receiveShadow=true;const m=new THREE.Matrix4(),q=new THREE.Quaternion();let lo=1e9;
-  G.cells.forEach(([i,j,t],k)=>{const x=G.x0+(j+.5)*c,z=G.z0+(i+.5)*c,top=t/10,gr=hAt(x,z)-1;lo=Math.min(lo,gr);const hh=Math.max(.5,top-gr-.6);
-    m.compose(new THREE.Vector3(x,gr+hh/2,z),q,new THREE.Vector3(c+.02,hh,c+.02));body.setMatrixAt(k,m);
-    m.compose(new THREE.Vector3(x,top-.3,z),q,new THREE.Vector3(c+.02,.6,c+.02));cap.setMatrixAt(k,m)});
-  body.userData.id=cap.userData.id=H.id;g.add(body,cap);pick.push(body,cap);
-  const l=label(H.label,H.role==='featured');l.position.set(H.x,H.grade+H.ridge_h+10,H.z);g.add(l)}
-/* facet buildings: each measured roof facet is a polygon on its plane, extruded down to the ground */
-const FACADE=(()=>{const c=document.createElement('canvas');c.width=128;c.height=128;const g=c.getContext('2d');g.fillStyle='#d8cdb8';g.fillRect(0,0,128,128);
-  for(let y=0;y<128;y+=8){g.fillStyle='rgba(120,70,50,.06)';g.fillRect(0,y,128,1)}
-  g.fillStyle='#3e4a55';for(const x of[20,76])g.fillRect(x,28,32,62);g.fillStyle='#f3f1ea';for(const x of[20,76]){g.fillRect(x-3,24,38,5);g.fillRect(x-3,90,38,5);g.fillRect(x+15,28,3,62);g.fillRect(x,57,32,3)}
-  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=8;t.repeat.set(1/12,1/11);return t})();
-const MAT_FWALL=new THREE.MeshStandardMaterial({map:FACADE,roughness:.9,side:THREE.DoubleSide});
-const MAT_FWALL_F=new THREE.MeshStandardMaterial({map:FACADE,color:0xfff0b0,roughness:.9,side:THREE.DoubleSide});
-const MAT_SLATE=new THREE.MeshStandardMaterial({map:MAT.shingle.map,color:0x9aa0a8,roughness:.9,side:THREE.DoubleSide});
-const MAT_FLAT=new THREE.MeshStandardMaterial({color:0x6e7174,roughness:.95,side:THREE.DoubleSide});
-function buildFacets(H){
-  const g=new THREE.Group();g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;
-  const wallMat=H.role==='featured'?MAT_FWALL_F:MAT_FWALL;
-  const rp=[],rpi=[],ru=[],fp=[],fpi=[],fu=[],wp=[],wu=[];
-  const yAt=(pl,x,z)=>pl[0]*x+pl[1]*z+pl[2];
-  for(const f of H.facets){const pl=f.plane,pitched=f.pitch>8;
-    const sh=new THREE.Shape(f.outer.map(p=>new THREE.Vector2(p[0],p[1])));
-    for(const h of f.holes)sh.holes.push(new THREE.Path(h.map(p=>new THREE.Vector2(p[0],p[1]))));
-    const sg=new THREE.ShapeGeometry(sh),pos=sg.attributes.position,idx=sg.index.array;
-    const P=pitched?rp:fp,I=pitched?rpi:fpi,U=pitched?ru:fu,base=P.length/3;
-    for(let k=0;k<pos.count;k++){const x=pos.getX(k),z=pos.getY(k);P.push(x,yAt(pl,x,z)+.15,z);U.push(x,z)}
-    for(let k=0;k<idx.length;k++)I.push(base+idx[k]);
-    // walls: every ring edge from the ground up to the facet plane
-    for(const ring of[f.outer,...f.holes])for(let k=0;k<ring.length;k++){const a=ring[k],b=ring[(k+1)%ring.length];
-      const ya=yAt(pl,a[0],a[1]),yb=yAt(pl,b[0],b[1]),ga=hAt(a[0],a[1])-1.5,gb=hAt(b[0],b[1])-1.5,L=Math.hypot(b[0]-a[0],b[1]-a[1]);
-      wp.push(a[0],ga,a[1], b[0],gb,b[1], b[0],yb,b[1],  a[0],ga,a[1], b[0],yb,b[1], a[0],ya,a[1]);
-      wu.push(0,ga, L,gb, L,yb, 0,ga, L,yb, 0,ya)}}
-  const mkmesh=(pos,ind,uv,mat)=>{if(!pos.length)return;const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));if(ind)geo.setIndex(ind);geo.computeVertexNormals();
-    const m=new THREE.Mesh(geo,mat);m.castShadow=m.receiveShadow=true;m.userData.id=H.id;g.add(m);pick.push(m)};
-  mkmesh(rp,rpi,ru,MAT_SLATE);mkmesh(fp,fpi,fu,MAT_FLAT);mkmesh(wp,null,wu,wallMat);
-  const l=label(H.label,H.role==='featured');l.position.set(H.x,H.grade+H.ridge_h+10,H.z);g.add(l)}
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false}));s.scale.set(22,8.6,1);s.renderOrder=9;return s}
 function buildHouse(H){
-  if(H.roof.type==='facets')return buildFacets(H);
-  if(H.roof.type==='massing')return buildMassing(H);
   const g=new THREE.Group();g.position.set(H.x,H.grade,H.z);g.rotation.y=H.rot;g.userData.id=H.id;scene.add(g);g.updateMatrixWorld();GROUPS[H.id]=g;
   const w=H.w,d=H.d,wh=H.wall_h,R=H.roof,SD=mk(sidingDraw(H.siding),4.67,256),st=Math.max(1,H.stories||1),fh=wh/st;
   wall(g,w,wh,d,0,wh/2,0,SD,SD);roofBand(g,w,d,wh+.2);corners(g,w,d,wh);
-  if(R.type==='flat'){box(w+1,1,d+1,solid(0x55585c),0,wh+.6,0,g);box(w+1.2,1.6,.5,MAT.trim,0,wh+1.4,d/2+.5,g,false)}
-  else if(R.type==='hip')hipRoof(g,w,d,R.h,wh+.6);
+  if(R.type==='hip')hipRoof(g,w,d,R.h,wh+.6);
   else if(R.ridge_axis==='z')gable(g,'z',w,d,R.h,wh+.6,0,0,SD);else gable(g,'x',d,w,R.h,wh+.6,0,0,SD);
   for(const c of(R.cross||[])){const len=Math.max(6,c.to-c.from),cz=(c.to+c.from)/2;
     if(R.ridge_axis!=='z'){const pos=Math.max(-w/2+c.span/2,Math.min(w/2-c.span/2,c.pos));
       if(c.to>d/2+1.5){const bd=c.to-d/2;wall(g,c.span-.8,wh,bd,pos,wh/2,d/2+bd/2,SD,SD);roofBand(g,c.span-.8,bd,wh+.2,pos,d/2+bd/2)}
       gable(g,'z',c.span,len,c.h,wh+.6,pos,cz,SD,[1]);if(c.h>7)oculus(g,pos,wh+.6+c.h*.42,Math.max(d/2,c.to)+.15,Math.min(1.2,c.span/14))}
     else gable(g,'x',c.span,len,c.h,wh+.6,cz,c.pos,SD,[1])}
-  // front facade
   const gs=H.garage_side,nG=w>=40?2:(w>=28?1:0),gw=8.6,gzone=nG*(gw+1.2)+1,gx=gs*(w/2-gzone/2-1.2),dz=d/2;
   if(nG){for(let k=0;k<nG;k++)garageDoor(g,gx+(k-(nG-1)/2)*(gw+1.2),dz,gw,H.garage);}
-  const dx=nG?-gs*Math.min(w*.14,w/2-6):-w*.12;frontDoor(g,dx,dz+.02,H.door,{transom:st>1});
-  box(5.6,.6,3.4,MAT.conc,dx,.3,dz+1.7,g);
+  const dx=nG?-gs*Math.min(w*.14,w/2-6):-w*.12;frontDoor(g,dx,dz+.02,H.door,{transom:st>1});box(5.6,.6,3.4,MAT.conc,dx,.3,dz+1.7,g);
   for(let f=0;f<st;f++){const y=f*fh+fh*.55,n=Math.max(1,Math.floor((w-6)/8));for(let k=0;k<n;k++){const x=-w/2+3+(k+.5)*(w-6)/n;
     if(f===0&&(Math.abs(x-dx)<4.2||(nG&&Math.abs(x-gx)<gzone/2+1.6)))continue;win(g,x,y,dz,{})}}
-  // sides and back
   for(const sx of[-1,1])for(let f=0;f<st;f++){const n=Math.max(1,Math.floor(d/14));for(let k=0;k<n;k++){const z=-d/2+(k+.5)*d/n;if(f===0&&nG&&sx===gs&&z>d/2-24)continue;win(g,sx*(w/2),f*fh+fh*.55,z,{ry:sx*Math.PI/2})}}
   for(let f=0;f<st;f++){const n=Math.max(1,Math.floor((w-6)/10));for(let k=0;k<n;k++)win(g,-w/2+3+(k+.5)*(w-6)/n,f*fh+fh*.55,-d/2,{ry:Math.PI})}
   const back=basement(g,w,d,SD);if(back<-5)deck(g,0,-d/2-6,Math.min(18,w*.45),12);
-  if(nG)driveway(g,gx-gzone/2+.5,gx+gzone/2-.5,dz);
-  const walk=new THREE.Vector3();for(let k=1;k<=4;k++){}
   for(const x of[dx-4.5,dx+4.5])shrub(g,x,dz+2.2,1.5);
-  const l=label(H.label,H.role==='featured');l.position.set(0,(H.ridge_h||wh+10)+9,0);g.add(l);
-  g.traverse(o=>{if(o.isMesh)pick.push(o)});
-}
-S.houses.forEach(buildHouse);
+  if(H.role==='featured'){const l=label(H.label,true);l.position.set(0,(H.ridge_h||wh+10)+10,0);g.add(l)}
+  g.traverse(o=>{if(o.isMesh)pick.push(o)})}
+S.houses.forEach((H,k)=>H.roof.type==='grid'?buildGrid(H,H.wall_color||WALLS[(H.hash>>>0)%WALLS.length]):buildHouse(H));
 
-/* featured footprint outline */
-if(FEAT.roof.type!=='massing'&&FEAT.roof.type!=='facets'){const H=FEAT,g=GROUPS[H.id],o=4,pts=[[-H.w/2-o,H.d/2+o],[H.w/2+o,H.d/2+o],[H.w/2+o,-H.d/2-o],[-H.w/2-o,-H.d/2-o],[-H.w/2-o,H.d/2+o]],a=new THREE.Vector3(),b=new THREE.Vector3();
-  for(let e=0;e<4;e++){const[x0,z0]=pts[e],[x1,z1]=pts[e+1];const n=Math.ceil(Math.hypot(x1-x0,z1-z0)/4);for(let k=0;k<n;k++){a.set(x0+(x1-x0)*k/n,0,z0+(z1-z0)*k/n);b.set(x0+(x1-x0)*(k+1)/n,0,z0+(z1-z0)*(k+1)/n);g.localToWorld(a);g.localToWorld(b);
-    const m=mesh(new THREE.BoxGeometry(1,.3,a.distanceTo(b)+.3),MAT.acc,(a.x+b.x)/2,(hAt(a.x,a.z)+hAt(b.x,b.z))/2+.35,(a.z+b.z)/2,scene,false);m.rotation.y=Math.atan2(b.x-a.x,b.z-a.z)}}}
+/* featured outline on the ground */
+if(S.outline&&S.outline.length>2){const pts=S.outline.concat([S.outline[0]]),a=new THREE.Vector3(),b=new THREE.Vector3();
+  for(let e=0;e<pts.length-1;e++){a.set(pts[e][0],0,pts[e][1]);b.set(pts[e+1][0],0,pts[e+1][1]);const L=a.distanceTo(b);if(L<.5)continue;
+    const m=mesh(new THREE.BoxGeometry(1.1,.35,L+.6),MAT.acc,(a.x+b.x)/2,(hAt(a.x,a.z)+hAt(b.x,b.z))/2+.4,(a.z+b.z)/2,scene,false);m.rotation.y=Math.atan2(b.x-a.x,b.z-a.z)}}
 
-/* trees at LiDAR canopy peaks */
-{const T=S.trees.filter(t=>roadDist(t.x,t.z)>10),N=T.length;if(N){const crown=new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1,1),new THREE.MeshStandardMaterial({roughness:1,flatShading:true}),N),trunk=new THREE.InstancedMesh(new THREE.CylinderGeometry(.5,.7,1,6),MAT.trunk,N);
-  crown.castShadow=trunk.castShadow=true;crown.receiveShadow=true;const m=new THREE.Matrix4(),c=new THREE.Color(),pal=[0x5a4630,0x6e5434,0x4a5428,0x24401f,0x5e3a22,0x3c4826,0x6b5230,0x2f5a2c];
-  T.forEach((t,i)=>{const gy=hAt(t.x,t.z),r=Math.max(5,Math.min(16,t.h*.3));m.compose(new THREE.Vector3(t.x,gy+t.h-r*.95,t.z),new THREE.Quaternion(),new THREE.Vector3(r,r*1.1,r));crown.setMatrixAt(i,m);c.set(pal[i%pal.length]);crown.setColorAt(i,c);
+/* trees at LiDAR canopy peaks, inside the site */
+{const T=S.trees,N=T.length;if(N){const crown=new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1,1),new THREE.MeshStandardMaterial({roughness:1,flatShading:true}),N),trunk=new THREE.InstancedMesh(new THREE.CylinderGeometry(.5,.7,1,6),MAT.trunk,N);
+  crown.castShadow=trunk.castShadow=true;crown.receiveShadow=true;const m=new THREE.Matrix4(),c=new THREE.Color(),pal=[0x4f6b2a,0x5d7a33,0x3f5d28,0x6b7d3a,0x4a6a30,0x587038];
+  T.forEach((t,i)=>{const gy=hAt(t.x,t.z),r=Math.max(5,Math.min(18,t.h*.3));m.compose(new THREE.Vector3(t.x,gy+t.h-r*.95,t.z),new THREE.Quaternion(),new THREE.Vector3(r,r*1.05,r));crown.setMatrixAt(i,m);c.set(pal[i%pal.length]);crown.setColorAt(i,c);
     const th=Math.max(4,t.h-r*1.6);m.compose(new THREE.Vector3(t.x,gy+th/2,t.z),new THREE.Quaternion(),new THREE.Vector3(Math.max(.8,t.h/40),th,Math.max(.8,t.h/40)));trunk.setMatrixAt(i,m)});
   scene.add(crown,trunk)}}
 
 /* ---------- UI ---------- */
-const ROOFN={gable:'Gable',hip:'Hip',flat:'Flat',massing:'Complex',facets:'Multi-plane'};
-function show(id){const H=S.houses.find(h=>h.id===id);const tag=document.getElementById('tag');tag.textContent=H.role==='featured'?'Featured address':'Neighbor';tag.className='tag'+(H.role==='featured'?'':' n');
-  document.getElementById('addr').textContent=H.role==='featured'?S.title:(H.number?`${H.number} ${H.street||S.street||''}`.trim():'Neighboring house');
-  const MS=H.roof.type==='massing'||H.roof.type==='facets';
-  document.getElementById('stats').innerHTML=(MS?[['Height',`${Math.round(H.ridge_h)} ft`],['Roof area',`${Math.round(H.area_ft2/100)*100} ft²`],['Typical',`${Math.round(H.wall_h)} ft`],['Stories',`~${H.stories}`]]:[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
-  if(MS){document.getElementById('look').textContent=H.roof.type==='facets'?`Rebuilt from ${H.roof.facets} measured roof planes${H.roof.pitch_deg?`, typical pitch ${Math.round(H.roof.pitch_deg)}°`:''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.`:`Large building, shown as a LiDAR massing model. Tallest point ${Math.round(H.ridge_h)} ft above grade.`;return}
-  const cg=(H.roof.cross||[]).length;document.getElementById('look').textContent=`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`}
+const ROOFN={gable:'Gable',hip:'Hip',flat:'Flat',grid:'Multi-plane'};
+function show(id){const H=S.houses.find(h=>h.id===id);const F=H.role==='featured';const tag=document.getElementById('tag');tag.textContent=F?'Featured address':'Nearby building';tag.className='tag'+(F?'':' n');
+  document.getElementById('addr').textContent=H.name||(F?S.title:(H.number?`${H.number} ${H.street||''}`.trim():'Nearby building'));
+  document.getElementById('sub').textContent=F?(H.name?`${S.title}, ${S.sub}`:S.sub):(S.site_name||'');
+  const fx=H.facts,fe=document.getElementById('facts');
+  if(fx){const bits=[fx.summary,fx.wall&&`walls: ${fx.wall}`,fx.roof&&`roof: ${fx.roof}`,fx.style,fx.levels&&`${fx.levels} floors`].filter(Boolean);
+    fe.innerHTML='';fe.append(document.createTextNode((fx.basis==='site'?'From sources about the campus/site: ':'From sources: ')+bits.join('; ')+'. '));
+    (fx.sources||[]).slice(0,3).forEach((u,k)=>{const a=document.createElement('a');a.href=u;a.target='_blank';a.rel='noopener';a.textContent=`[${k+1}]`;fe.append(a,' ')})}else fe.textContent='';
+  const G=H.roof.type==='grid';
+  document.getElementById('stats').innerHTML=(G?[['Height',`${Math.round(H.ridge_h)} ft`],['Eaves',`${Math.round(H.wall_h)} ft`],['Roof area',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Pitch',H.roof.pitch_deg?`${Math.round(H.roof.pitch_deg)}°`:'flat']]
+    :[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+  const cg=(H.roof.cross||[]).length;
+  document.getElementById('look').textContent=G?`Roof rebuilt from ${H.roof.planes} measured planes${H.clipped?' (clipped at the site edge)':''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.`
+    :`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`;
+  document.getElementById('site').textContent=`Shown: everything within ${S.buffer_ft} ft of the building — ${S.houses.length-1} other building${S.houses.length===2?'':'s'} and ${S.trees.length} trees.`}
 show(FEAT.id);
-const F=S.front,FX=FEAT.x,FZ=FEAT.z;
+const F=S.front,FX=FEAT.x,FZ=FEAT.z,SZ=Math.max(FEAT.w,FEAT.d),SIDE=[-F[1],F[0]];
 let fly=null;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 function goTo(p,t){fly={p0:camera.position.clone(),t0:controls.target.clone(),p1:new THREE.Vector3(...p),t1:new THREE.Vector3(...t),k:0}}
-const fy=hAt(FX+F[0]*(FEAT.d/2+45),FZ+F[1]*(FEAT.d/2+45));
-document.getElementById('v-street').onclick=()=>goTo([FX+F[0]*(FEAT.d/2+46+SZ*.4)+F[1]*12,fy+6,FZ+F[1]*(FEAT.d/2+46+SZ*.4)-F[0]*12],[FX,FEAT.grade+12,FZ]);
-document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*40,320,FZ+F[1]*40],[FX,0,FZ]);
+const TGT=[FX,FEAT.grade+Math.min(FEAT.ridge_h,40)*.45,FZ];
+function overview(){const D=Math.max(150,SZ*1.25+150)*(innerWidth<600?1.3:1);return[FX+F[0]*D*.8+SIDE[0]*D*.45,FEAT.grade+D*.62,FZ+F[1]*D*.8+SIDE[1]*D*.45]}
+document.getElementById('v-street').onclick=()=>{const D=SZ/2+55,x=FX+F[0]*D+SIDE[0]*D*.25,z=FZ+F[1]*D+SIDE[1]*D*.25;goTo([x,hAt(x,z)+6,z],[FX,FEAT.grade+Math.min(FEAT.ridge_h,40)*.55,FZ])};
+document.getElementById('v-aerial').onclick=()=>goTo([FX+F[0]*30,FEAT.grade+Math.max(320,SZ*2.4),FZ+F[1]*30],[FX,FEAT.grade,FZ]);
 const spinB=document.getElementById('v-spin');spinB.onclick=()=>{controls.autoRotate=!controls.autoRotate;controls.autoRotateSpeed=1.1;spinB.setAttribute('aria-pressed',controls.autoRotate)};
 const duskB=document.getElementById('v-dusk');
-function setDusk(on){duskB.setAttribute('aria-pressed',on);const sky=new THREE.Color(on?0x2a2540:0xc9d6df);scene.background=sky;scene.fog=new THREE.Fog(sky,420,1300);
-  hemi.intensity=on?.25:.7;hemi.color.set(on?0x8f7aa8:0xe4eef6);sun.intensity=on?.5:1.15;sun.color.set(on?0xff9a5a:0xfff1dc);sun.position.set(on?-260:-120,on?80:200,on?40:160);for(const k in winMat)winMat[k].emissiveIntensity=on?1:0}
+function setDusk(on){duskB.setAttribute('aria-pressed',on);const sky=new THREE.Color(on?0x2a2540:0xdfe6ea);scene.background=sky;scene.fog=new THREE.Fog(sky,900,2600);
+  hemi.intensity=on?.25:.75;hemi.color.set(on?0x8f7aa8:0xe4eef6);sun.intensity=on?.5:1.1;sun.color.set(on?0xff9a5a:0xfff1dc);sun.position.set(on?-260:-160,on?80:240,on?40:120);for(const k in winMat)winMat[k].emissiveIntensity=on?1:0}
 setDusk(document.documentElement.dataset.theme==='dark'||(!document.documentElement.dataset.theme&&matchMedia('(prefers-color-scheme: dark)').matches));
 duskB.onclick=()=>setDusk(duskB.getAttribute('aria-pressed')!=='true');
+Object.assign(sun.shadow.camera,{left:-EXT/2,right:EXT/2,top:EXT/2,bottom:-EXT/2,near:10,far:1600});sun.shadow.mapSize.set(4096,4096);sun.shadow.camera.updateProjectionMatrix();
+controls.maxDistance=EXT*2.2;camera.far=6000;camera.updateProjectionMatrix();
 const ray=new THREE.Raycaster(),ptr=new THREE.Vector2();let down=null;
 renderer.domElement.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY]});
 renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>5)return;const r=renderer.domElement.getBoundingClientRect();ptr.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);ray.setFromCamera(ptr,camera);const hit=ray.intersectObjects(pick)[0];if(!hit)return;let o=hit.object;while(o&&!o.userData.id)o=o.parent;
-  if(o){show(o.userData.id);const f=new THREE.Vector3(0,0,95);o.localToWorld(f);goTo([f.x+20,o.position.y+24,f.z],[o.position.x,o.position.y+12,o.position.z])}});
+  if(o)show(o.userData.id)});
 function resize(){const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.fov=w<600?58:45;camera.updateProjectionMatrix()}
 const ro=new ResizeObserver(resize);ro.observe(host);resize();
-const SZ=Math.max(FEAT.w,FEAT.d),D0=(innerWidth<600?175:135)*Math.max(1,SZ/45);camera.position.set(FX+F[0]*D0-F[1]*60,FEAT.grade+110,FZ+F[1]*D0+F[0]*60);controls.target.set(FX,FEAT.grade+10,FZ);
-goTo([FX+F[0]*D0*.85-F[1]*45,FEAT.grade+62*Math.max(1,SZ/45),FZ+F[1]*D0*.85+F[0]*45],[FX,FEAT.grade+8,FZ]);
+{const o=overview();camera.position.set(o[0]+SIDE[0]*60,o[1]+60,o[2]+SIDE[1]*60);controls.target.set(...TGT);goTo(o,TGT)}
 window.__cam=(p,t)=>{fly=null;camera.position.set(...p);controls.target.set(...t);controls.update()};window.__S=S;
 renderer.setAnimationLoop(()=>{if(fly){fly.k=reduce?1:Math.min(1,fly.k+.022);const e=1-Math.pow(1-fly.k,3);camera.position.lerpVectors(fly.p0,fly.p1,e);controls.target.lerpVectors(fly.t0,fly.t1,e);if(fly.k>=1)fly=null}controls.update();renderer.render(scene,camera)});
 }

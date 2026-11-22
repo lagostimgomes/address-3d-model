@@ -46,7 +46,11 @@ and publishes the page.
 3. `pipeline/build/analyze_site.py`: finds roofs by clustering single-return points, fits roof
    planes with RANSAC, and picks the featured house and one neighbor on each side along the
    street. Writes `scene.json`.
-4. `pipeline/build/build_model.py`: writes `index.html` from `template.html` and the scene.
+4. `pipeline/enrich/identify.py`: names the buildings. It finds institutions around the site via OpenStreetMap, then
+   verifies candidate building names against the measured footprints. A sourced `facts.json` (materials, style,
+   floors), gathered by Claude from authoritative pages, sets colours, roofs and window rows. Ordinary homes are not researched.
+5. `pipeline/build/build_model.py`: writes `index.html` from `template.html` and the scene. The site is everything
+   within 100 ft of the building's footprint, shown on a base like an architect's site model.
 
 ## Network
 

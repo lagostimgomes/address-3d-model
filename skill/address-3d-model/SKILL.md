@@ -39,10 +39,30 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
 | 5 | Analysis failed, for example no buildings found. | Report it plainly. It usually means very sparse or old LiDAR, or the geocode landed off the parcel. |
 | 6 | Build failed. | Report the error. |
 
-## 3. Check the result
+## 3. Name and enrich (automatic, still no questions)
 
-- `RESULT.houses` should hold the featured house plus up to 2 neighbors. Fewer neighbors is fine at corner lots or rural sites; mention it.
-- Large or complex buildings (campus, apartment, commercial) come back with roof type `facets`: rebuilt from their measured roof planes (outline, slopes and heights), with generic windowed walls. Describe them by tallest point, typical eave height, roof area and typical pitch, and don't apply the house limits below.
+Outside material makes notable buildings look right: names, floor counts, wall and roof materials, and style. Use this general procedure for every address. Never tailor it to one place.
+
+1. Run `"$PY" "$A/pipeline/enrich/identify.py" sites/<slug>`. It lists institutions or sites around the building, each with a name, website and Wikidata ID.
+2. **Privacy:** research a building only if it's non-residential or a public landmark. That means a named institution appears in step 1 within about 1,000 ft, or the featured building's roof type is `grid`. For ordinary homes, skip the web research; OpenStreetMap tags from step 1 are fine. Never look up owners or occupants.
+3. **Candidate names:** search the web for the address, then for "<institution> campus buildings" or "<institution> campus map". Collect the building names you find.
+4. **Verify:** run `identify.py sites/<slug> --names "Name 1" "Name 2" ...`. A name is accepted only if OpenStreetMap places it on one of the measured buildings. Use only the accepted names.
+5. **Facts:** for each accepted building, and for the institution as a whole, search for its architecture. Prefer authoritative sources:
+   - National Register nominations (npgallery.nps.gov)
+   - state historic inventories
+   - the institution's facilities pages
+   - the architect's project page
+   - Wikipedia
+
+   Record only what a source states: wall material or color, roof material, style, number of floors, year, and a one-line summary. Mark each building's `basis` as `building` for facts about that building, or `site` for campus or district facts applied to it.
+6. Write `sites/<slug>/facts.json` (the format is in the `build_model.py` docstring), with at least one source URL per building. Then run `"$PY" "$A/pipeline/build/build_model.py" sites/<slug>`.
+
+Leave out anything you can't source. If nothing is found, skip this step: the model is complete without it.
+
+## 4. Check the result
+
+- The model shows the building at the address plus every building, tree and paved area within 100 ft of its footprint. Touching buildings are shown whole, up to 40,000 sq ft of roof.
+- Buildings other than simple houses come back with roof type `grid`: one continuous roof rebuilt from their measured planes, with walls at the outline and at height steps. Describe them by tallest point, typical eave height, roof area and typical pitch, and don't apply the house limits below.
 - Sanity limits for a house:
   - wall height (eave): 8–32 ft
   - ridge height: 12–45 ft
@@ -51,7 +71,7 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
 
   If the featured house breaks them, say the LiDAR fit is unreliable rather than presenting it as measured.
 
-## 4. Deliver
+## 5. Deliver
 
 - **If an artifact or page-publishing tool is available** (claude.ai): publish `RESULT.html` as a new artifact from the file.
   - title: the street address, for example "1600 Pennsylvania Ave NW"
@@ -60,11 +80,12 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
   Artifact pages allow three.js loaded from cdnjs and jsdelivr.
 - **Otherwise** (for example Claude Code): give the user the path to `RESULT.html` and open it in the default browser: `open` on macOS, `start ""` on Windows, `xdg-open` on Linux. The page needs internet to load three.js.
 
-## 5. Reply
+## 6. Reply
 
 Write three or four sentences, without pasting the HTML:
-- the featured building's measured ridge height, roof type and pitch, and footprint (for `facets`: tallest point, typical eave height, roof area, typical pitch)
-- which neighbors were found
+- the featured building's measured ridge height, roof type and pitch, and footprint (for `grid`: tallest point, typical eave height, roof area, typical pitch)
+- the building's name and the sourced facts, if step 3 found any, saying whether they're about the building or the campus/site
+- how many buildings and trees the 100 ft site includes
 - the LiDAR survey years (`RESULT.datasets`)
 - if `RESULT.location_precision` is `street`, say the address wasn't in the National Address Database, so the highlighted house is the nearest one to a street-level point and may be a neighbor; offer to move it
 - caveats: windows, doors, garages and colors are generated, not observed; streets and parking are drawn from LiDAR-measured pavement (plus OpenStreetMap centerlines when reachable); complex roofs are simplified to a main roof plus cross gables
