@@ -61,3 +61,8 @@ Needs HTTPS access to: `geocoding.geo.census.gov`, `nominatim.openstreetmap.org`
 
 Data: USGS 3DEP (public domain), OpenStreetMap contributors (ODbL), U.S. Census geocoder.
 Built by Claude and Codex.
+
+## License
+
+Copyright 2026 lagostimgomes. Licensed under the [Apache License, Version 2.0](LICENSE).
+The data the pipeline downloads keeps its own terms: USGS 3DEP is public domain, and OpenStreetMap is ODbL.
