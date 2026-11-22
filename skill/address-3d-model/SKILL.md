@@ -42,6 +42,7 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
 ## 3. Check the result
 
 - `RESULT.houses` should hold the featured house plus up to 2 neighbors. Fewer neighbors is fine at corner lots or rural sites; mention it.
+- Large or complex buildings (campus, apartment, commercial) come back with roof type `massing`: their measured outline and heights in 3 ft columns. Describe them that way, with no pitch, and don't apply the house limits below.
 - Sanity limits for a house:
   - wall height (eave): 8–32 ft
   - ridge height: 12–45 ft
@@ -62,7 +63,7 @@ The last line is `RESULT: {...}` (JSON). The exit code tells you what happened:
 ## 5. Reply
 
 Write three or four sentences, without pasting the HTML:
-- the featured house's measured ridge height, roof type and pitch, and footprint
+- the featured building's measured ridge height, roof type and pitch, and footprint (for `massing`: tallest point, typical roof height, roof area)
 - which neighbors were found
 - the LiDAR survey years (`RESULT.datasets`)
 - if `RESULT.location_precision` is `street`, say the address wasn't in the National Address Database, so the highlighted house is the nearest one to a street-level point and may be a neighbor; offer to move it

@@ -283,6 +283,44 @@ def measure_building(P, planes, terrain, front_hint):
     return out, info
 
 
+def massing(c, terr, front_vec, cell=3.0):
+    """Large or complex building: its measured shape as columns on a 3 ft grid (top = 95th pct height)."""
+    from scipy import ndimage
+    P = c['P']
+    x0, z0 = float(P[:, 0].min()) - cell, float(P[:, 2].min()) - cell
+    j = ((P[:, 0] - x0) / cell).astype(int); i = ((P[:, 2] - z0) / cell).astype(int)
+    G = np.full((i.max() + 2, j.max() + 2), np.nan)
+    order = np.lexsort((P[:, 1], i, j))
+    for a, b, yv in zip(i[order], j[order], P[order, 1]):
+        G[a, b] = yv if np.isnan(G[a, b]) else max(G[a, b], yv)
+    occ = ~np.isnan(G)
+    filled = ndimage.binary_closing(occ, iterations=1) | occ
+    filled = ndimage.binary_fill_holes(filled)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        med = ndimage.generic_filter(np.where(occ, G, np.nan), np.nanmedian, size=3, mode='constant', cval=np.nan)
+    top = np.where(np.isnan(med), G, med)                       # 3x3 median smooths edge hits and rooftop clutter
+    top = np.where(np.isnan(top), np.nanmedian(G), top)
+    top = np.round(top * 2) / 2
+    cells = []
+    for a, b in zip(*np.nonzero(filled)):
+        cells.append([int(a), int(b), int(round(float(top[a, b]) * 10))])
+    xs = x0 + (np.nonzero(filled)[1] + .5) * cell; zs = z0 + (np.nonzero(filled)[0] + .5) * cell
+    cx, cz = float(xs.mean()), float(zs.mean())
+    tops = np.array([t for _, _, t in cells]) / 10
+    grade = float(np.median(terr(xs, zs)))
+    rot = math.atan2(front_vec[0], front_vec[1])
+    area = len(cells) * cell * cell
+    return dict(type='massing', x=round(cx, 2), z=round(cz, 2), rot=round(rot, 4), grade=round(grade, 2),
+                w=round(float(xs.max() - xs.min() + cell), 1), d=round(float(zs.max() - zs.min() + cell), 1),
+                wall_h=round(float(np.median(tops) - grade), 1), ridge_h=round(float(tops.max() - grade), 1),
+                eave_h=round(float(np.median(tops) - grade), 1), area_ft2=round(area),
+                stories=max(1, int(round((np.median(tops) - grade) / 12))),
+                roof=dict(type='massing', pitch_deg=0),
+                grid=dict(x0=round(x0, 2), z0=round(z0, 2), cell=cell, cells=cells))
+
+
 def analyze(folder, verbose=True):
     site, E, cell, roads = load_site(folder)
     terr = Terrain(E, cell)
@@ -293,7 +331,7 @@ def analyze(folder, verbose=True):
     NR = np.concatenate([d['nret'] for d in D])
     S = np.concatenate([np.full(d['n'], i) for i, d in enumerate(D)])
     # roofs return one echo; tree canopy returns several. Keep single returns for building detection.
-    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 70) & (np.abs(X) < 260) & (np.abs(Z) < 260) & (NR <= 1)
+    m = (~np.isin(C, list(NONBUILD))) & (H > 6) & (H < 260) & (np.abs(X) < 260) & (np.abs(Z) < 260) & (NR <= 1)
     x, y, z, h, s = X[m], Y[m], Z[m], H[m], S[m]
     lab, n = clusters(x, z, cell=3.0, dilate=0)
     polys = road_polylines(roads)
@@ -311,16 +349,17 @@ def analyze(folder, verbose=True):
         frac = nroof / len(I)
         big = max(len(J) for _, J in roof)
         # trees give many small noisy planes; roofs give a few large ones
-        if R['area'] < 350 or R['area'] > 15000 or big < 35: continue
+        if R['area'] < 350 or big < 35: continue
         if frac < 0.35 and big / len(I) < 0.2: continue
-        cands.append(dict(I=I, P=P, planes=planes, rect=R, frac=frac, n=len(I)))
+        cands.append(dict(I=I, P=P, planes=planes, rect=R, frac=frac, n=len(I), large=R['area'] > 15000,
+                          d0=float(np.hypot(P[:, 0], P[:, 2]).min())))
     if not cands: sys.exit('no buildings found in the LiDAR near this address')
     # featured: building containing / nearest the geocode
-    def dist0(c): return math.hypot(c['rect']['cx'], c['rect']['cz'])
-    feat = min(cands, key=dist0)
-    if dist0(feat) > 120:
-        sys.exit(f'no house-sized building within 120 ft of the geocoded point (nearest is {dist0(feat):.0f} ft away); '
-                 'the geocode may be off, or the building is not a house')
+    # the building the address point falls on (or the nearest one's closest roof point)
+    feat = min(cands, key=lambda c: c['d0'])
+    if feat['d0'] > 120:
+        sys.exit(f'no building within 120 ft of the address point (nearest roof is {feat["d0"]:.0f} ft away); '
+                 'the geocode may be off, or the LiDAR predates the building')
     fpt = np.array([feat['rect']['cx'], feat['rect']['cz']])
     nr = nearest_road(fpt, polys) if polys else None
     if nr:
@@ -345,8 +384,12 @@ def analyze(folder, verbose=True):
         front = best[1]; tangent = tang
 
     def mk(c, front_vec):
-        res = measure_building(c['P'], c['planes'], terr, front_vec)
-        return res[0] if res else None
+        res = None if c['large'] else measure_building(c['P'], c['planes'], terr, front_vec)
+        if res:
+            hh = res[0]
+            # a house-style fit that is out of house range falls back to massing
+            if 8 <= hh['wall_h'] <= 40 and hh['ridge_h'] <= 60 and max(hh['w'], hh['d']) <= 130: return hh
+        return massing(c, terr, front_vec)
     houses = []
     fh = mk(feat, front)
     if not fh: sys.exit('could not fit a roof to the featured building')
@@ -403,7 +446,7 @@ def analyze(folder, verbose=True):
     json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), indent=1)
     if verbose:
         for hh in houses:
-            print(f"{hh['id']:9s} at ({hh['x']:7.1f},{hh['z']:7.1f}) rot {hh['rot']:+.3f}  {hh['w']}x{hh['d']} ft  wall {hh['wall_h']}  ridge {hh['ridge_h']}  roof {hh['roof']}")
+            print(f"{hh['id']:9s} at ({hh['x']:7.1f},{hh['z']:7.1f}) rot {hh['rot']:+.3f}  {hh['w']}x{hh['d']} ft  wall {hh['wall_h']}  ridge {hh['ridge_h']}  roof {hh['roof'] if hh['roof']['type'] != 'massing' else 'massing, ' + str(hh['area_ft2']) + ' ft2, ' + str(len(hh['grid']['cells'])) + ' columns'}")
         print(f"trees {len(trees)}, building candidates {len(cands)}, street source {scene['street']['source']}")
     return scene
 
