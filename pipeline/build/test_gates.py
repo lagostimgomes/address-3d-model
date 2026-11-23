@@ -92,6 +92,33 @@ class AdversarialR2(unittest.TestCase):
         self.assertEqual(b['base']['verdict'], 'incomplete')     # no dem.json: base height cannot be verified
         self.assertEqual(r['acceptance'], 'incomplete')
 
+    def test_empty_encoded_mesh_fails(self):                    # Codex S2.1 follow-up #1
+        r = run_case([{'id': 'e', 'type': 'mesh', 'mesh': {'roof': {'n': 0}}, 'parts': []}])
+        self.assertEqual(r['acceptance'], 'fail')
+
+    def test_multiple_roof_hits_fail(self):                     # Codex S2.1 follow-up #2
+        top, walls, base = box(0, 0, 40, 40, 0, 20)
+        top2, _, _ = box(0, 0, 40, 40, 0, 30)
+        pts = [[x, 30.1, z, (int(x // 10) * 100003 + int(z // 10))] for x in np.linspace(1, 39, 10) for z in np.linspace(1, 39, 10)]
+        r = run_case([house(roof=np.concatenate([top, top2]), walls=walls, base=base, parts=[{'id': 'p0', 'kind': 'flat'}])],
+                     heldout={'fixture': {'p0': pts}})
+        self.assertEqual(r['buildings'][0]['heldout']['verdict'], 'fail')
+        self.assertEqual(r['acceptance'], 'fail')
+
+    def test_coplanar_overlap_with_shared_vertex_detected(self):  # Codex S2.1 follow-up #3
+        from gates import intersections
+        tris = np.array([[(0, 0, 0), (4, 0, 0), (0, 0, 4)], [(0, 0, 0), (3, 0, 1), (1, 0, 3)]], float) * 100
+        V, inv = np.unique(tris.reshape(-1, 3).astype(np.int64), axis=0, return_inverse=True)
+        crossing, duplicate, _ = intersections(V, inv.reshape(-1, 3))
+        self.assertGreater(duplicate, 0)
+
+    def test_adjacent_coplanar_faces_sharing_an_edge_are_fine(self):
+        from gates import intersections
+        tris = np.array([[(0, 0, 0), (4, 0, 0), (4, 0, 4)], [(0, 0, 0), (4, 0, 4), (0, 0, 4)]], float) * 100
+        V, inv = np.unique(tris.reshape(-1, 3).astype(np.int64), axis=0, return_inverse=True)
+        crossing, duplicate, _ = intersections(V, inv.reshape(-1, 3))
+        self.assertEqual((crossing, duplicate), (0, 0))
+
     def test_empty_population_never_passes(self):
         r = run_case([{'id': 'h', 'type': 'house'}])
         self.assertEqual(r['acceptance'], 'incomplete')            # unchecked building keeps the site incomplete

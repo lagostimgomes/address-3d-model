@@ -6,16 +6,18 @@ The acceptance result aggregates every required gate: any fail -> fail; else any
 population is not_applicable and never certifies anything. Topology-only is reported separately.
 
 Per part-built building (decoded exactly as the page decodes it, welded only at identical int32 0.01 ft coordinates):
-- topology: degenerate triangles, non-manifold edges, edge-orientation conflicts, T-junctions (all boundary edges,
-  no truncation), open edges outside the declared base.
+- topology: an empty mesh fails; degenerate triangles, non-manifold edges, edge-orientation conflicts,
+  T-junctions (all open edges including the declared base, no truncation), open edges outside the declared base.
 - base: the declared base loop must be closed, consist of bottom edges of vertical wall triangles, and lie at
-  terrain - 1.5 ft (within 0.05 ft) when dem.json is available; otherwise the gate is incomplete.
+  terrain - 1.5 ft (within 0.05 ft) when dem.json is available; otherwise the gate is incomplete. It follows the
+  terrain, so it need not be horizontal on slopes.
 - orientation: every connected component, capped at its base loops, must have positive signed volume (outward
   normals); a negative volume is an inverted shell.
-- intersections: improper triangle crossings (beyond shared vertices/edges) and coplanar overlapping duplicates.
+- intersections: improper triangle crossings (beyond shared vertices/edges) and coplanar faces overlapping with
+  positive area, whether or not they share vertices.
 - held-out: withheld roof points (sidecar heldout.json written by the build) are measured against the EXPORTED roof
-  triangles by vertical ray casting; missing and multiple hits are counted; spatial blocks and both signed tails are
-  reported. < 50 points or < 3 blocks = incomplete (never pass). Thresholds are provisional development gates.
+  triangles by vertical ray casting; any multiple hit fails (roofs here are single-valued in plan); missing hits over
+  5% fail; spatial blocks and both signed tails are reported. < 50 points or < 3 blocks = incomplete (never pass). Thresholds are provisional development gates.
 Buildings that are not part-built (simple parametric houses) are reported as not_checked, which keeps the site's
 acceptance incomplete until that path exports checkable geometry.
 
@@ -90,14 +92,21 @@ def intersections(V, T):
                 seen.add(key)
                 if np.any(lo[i] > hi[j]) or np.any(lo[j] > hi[i]): continue
                 shared = set(T[i].tolist()) & set(T[j].tolist())
-                if len(shared) >= 2:
-                    # sharing an edge is legitimate unless the two are coplanar and fold onto each other
-                    ni, nj = nrm[i], nrm[j]
-                    if np.linalg.norm(np.cross(ni, nj)) < 1e-6 * np.linalg.norm(ni) * np.linalg.norm(nj) and ni @ nj < 0:
-                        duplicate += 1; examples.append(('fold', key))
+                ni, nj = nrm[i], nrm[j]
+                nn = np.linalg.norm(ni) * np.linalg.norm(nj)
+                coplanar = np.linalg.norm(np.cross(ni, nj)) < 1e-9 * nn + 1e-12 and abs(ni @ (tri[j][0] - tri[i][0])) < 1e-3 * np.linalg.norm(ni)
+                if coplanar:
+                    # coplanar faces may touch (shared vertex/edge) but must not overlap with positive area
+                    from shapely.geometry import Polygon
+                    ax = int(np.argmax(np.abs(ni))); keep = [d for d in range(3) if d != ax]
+                    pa = Polygon(tri[i][:, keep]); pb = Polygon(tri[j][:, keep])
+                    if pa.is_valid and pb.is_valid and pa.intersection(pb).area > 1.0:      # > 0.0001 ft2
+                        duplicate += 1
+                        if len(examples) < 10: examples.append(('coplanar-overlap', key))
                     continue
+                if len(shared) >= 2: continue                   # non-coplanar faces sharing an edge: a legitimate fold
                 hit = False
-                for (A, B, C, ta) in ((tri[i], tri[j], None, T[i]), (tri[j], tri[i], None, T[j])):
+                for (A, B, ta) in ((tri[i], tri[j], T[i]), (tri[j], tri[i], T[j])):
                     for k in range(3):
                         u, w = ta[k], ta[(k + 1) % 3]
                         if u in shared and w in shared: continue
@@ -106,16 +115,6 @@ def intersections(V, T):
                 if hit:
                     crossing += 1
                     if len(examples) < 10: examples.append(('cross', key))
-                    continue
-                # coplanar overlap (duplicate surfaces): same plane and overlapping in that plane
-                ni, nj = nrm[i], nrm[j]
-                if np.linalg.norm(np.cross(ni, nj)) < 1e-9 * np.linalg.norm(ni) * np.linalg.norm(nj) + 1e-12 and abs(ni @ (tri[j][0] - tri[i][0])) < 1e-3 * np.linalg.norm(ni) and not shared:
-                    ax = int(np.argmax(np.abs(ni))); keep = [d for d in range(3) if d != ax]
-                    from shapely.geometry import Polygon
-                    pa = Polygon(tri[i][:, keep]); pb = Polygon(tri[j][:, keep])
-                    if pa.is_valid and pb.is_valid and pa.intersection(pb).area > 1.0:   # > 0.0001 ft2
-                        duplicate += 1
-                        if len(examples) < 10: examples.append(('duplicate', key))
     return crossing, duplicate, examples
 
 
@@ -177,10 +176,10 @@ def check_building(h, terr=None, heldout=None):
     declared_unused = [e for e in declared if e not in edges or len(edges[e]) != 1]
     # T-junctions: a vertex strictly inside an open edge (all of them, no truncation)
     tj = 0
-    if undeclared_open:
+    if open_edges:
         from scipy.spatial import cKDTree
         tree = cKDTree(Vf)
-        for u, v in undeclared_open:
+        for u, v in open_edges:
             p, q = Vf[u], Vf[v]; d = q - p; L = np.linalg.norm(d)
             if L < 1: continue
             for k in tree.query_ball_point((p + q) / 2, L / 2 + 1):
@@ -190,7 +189,9 @@ def check_building(h, terr=None, heldout=None):
     topo = dict(degenerate=degenerate, nonmanifold=nonmanifold, orientation_conflicts=orient_conf, t_junctions=tj,
                 open_edges_not_declared=len(undeclared_open), declared_base_edges=len(declared),
                 declared_but_not_open=len(declared_unused))
-    topo['verdict'] = 'pass' if (degenerate == 0 and nonmanifold == 0 and orient_conf == 0 and tj == 0 and not undeclared_open and not declared_unused) else 'fail'
+    empty = len(T) == 0
+    topo['triangles_checked'] = int(len(T))
+    topo['verdict'] = 'fail' if empty else 'pass' if (degenerate == 0 and nonmanifold == 0 and orient_conf == 0 and tj == 0 and not undeclared_open and not declared_unused) else 'fail'
     # base loops: closed, bottoms of vertical wall triangles, at terrain - 1.5
     base_v = 'not_applicable'; base_detail = {}
     if declared:
@@ -231,10 +232,11 @@ def check_building(h, terr=None, heldout=None):
         vol /= 6.0
         vols.append(vol / 1e6)                     # ft3
         if vol < 0: inverted += 1
-    orient_v = 'not_applicable' if not comps else ('fail' if inverted else 'pass')
+    tiny = sum(1 for v in vols if 0 <= v < 1.0)                 # a closed shell under 1 ft3 is not a building solid
+    orient_v = 'fail' if (not comps or inverted or tiny) else 'pass'
     # intersections
     crossing, duplicate, ex = intersections(V, T) if len(T) else (0, 0, [])
-    inter_v = 'not_applicable' if not len(T) else ('fail' if (crossing or duplicate) else 'pass')
+    inter_v = 'fail' if not len(T) else ('fail' if (crossing or duplicate) else 'pass')
     # held-out on the exported roof
     ho_rows = []; ho_v = 'not_applicable'
     parts = h.get('parts') or []
@@ -249,7 +251,7 @@ def check_building(h, terr=None, heldout=None):
     acc = verdict(topo['verdict'], base_v, orient_v, inter_v, ho_v)
     return dict(id=h['id'], name=h.get('name'), triangles=int(len(T)), vertices=int(len(V)),
                 topology=topo, base=dict(verdict=base_v, **base_detail),
-                orientation=dict(verdict=orient_v, components=len(comps), inverted=inverted, volumes_ft3=[round(v, 1) for v in vols[:20]]),
+                orientation=dict(verdict=orient_v, components=len(comps), inverted=inverted, below_1ft3=tiny, volumes_ft3=[round(v, 1) for v in vols[:20]]),
                 intersections=dict(verdict=inter_v, crossings=crossing, duplicates=duplicate, examples=[list(map(str, e)) for e in ex[:5]]),
                 heldout=dict(verdict=ho_v, parts=ho_rows),
                 envelopes=sum(1 for p in parts if p['kind'] == 'envelope'), parts=len(parts),
@@ -290,12 +292,14 @@ def heldout_on_mesh(V, roofT, pts_by_part, parts):
         res = np.asarray(res)
         blocks = int(len(np.unique(pts[:, 3])))
         row = dict(id=p['id'], kind=p['kind'], n=int(len(pts)), measured=int(len(res)), missing_hits=missing, multiple_hits=multiple,
-                   blocks=blocks, covered_ft2=blocks * 100)
+                   blocks=blocks, block_area_ft2=blocks * 100,
+                   note='block_area_ft2 is the area of withheld 10 ft blocks, not measured roof coverage')
         if len(res):
             ab = np.abs(res)
             row.update(median_abs=round(float(np.median(ab)), 2), p90_abs=round(float(np.percentile(ab, 90)), 2),
                        signed_p10=round(float(np.percentile(res, 10)), 2), signed_p90=round(float(np.percentile(res, 90)), 2))
         if len(res) < MIN_HELDOUT or blocks < MIN_BLOCKS: row['verdict'] = 'incomplete'
+        elif multiple: row['verdict'] = 'fail'; row['reason'] = f'{multiple} withheld points see more than one roof surface (stacked or duplicate roofs)'
         elif missing > 0.05 * len(pts): row['verdict'] = 'fail'; row['reason'] = 'withheld points with no roof above or below them'
         elif row['median_abs'] <= GATE_MEDIAN and row['p90_abs'] <= GATE_P90: row['verdict'] = 'pass'
         else: row['verdict'] = 'fail'
