@@ -791,7 +791,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
         Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
         # one route for every building (user, 2026-11-23): explicit solids, so every model is gated the same way
-        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy)
+        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy, 'mapped' if rx else 'paving-estimate')
         hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
                   provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
                                   outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))
@@ -929,7 +929,7 @@ def absorb_fragments(L, min_cells):
     return L
 
 
-def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO, drive_xy=None):
+def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO, drive_xy=None, street_src='mapped'):
     """Any building that is not a simple house: explicit parts with fitted roof primitives (solids.py), one
     consistent exterior, openings on exposed walls, plain doors labelled with their evidence (C1-C3)."""
     import solids as SO
@@ -939,7 +939,7 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
     grade = float(np.median(terr(*np.array(pg.exterior.coords).T)))
     big = pg.area > 1800
     use = tags.get('building') or ('house' if pg.area < 2500 else 'yes')
-    doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big, drive_xy=drive_xy, garage_ok=pg.area < 4000)
+    doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big, drive_xy=drive_xy, garage_ok=pg.area < 4000, street_src=street_src)
     wins, fh, base = SO.openings(pg, R, terr, doors, use)
     # summary heights from the reconstructed parts (area-weighted)
     tops, eaves_, areas = [], [], []

@@ -255,7 +255,7 @@ def roof_y(pl, x, z, nx=0.0, nz=0.0):
 
 
 # ---------------------------------------------------------------- entrances
-def entrances(poly, ways, nodes, roads_xy, terr, big, drive_xy=None, garage_ok=False):
+def entrances(poly, ways, nodes, roads_xy, terr, big, drive_xy=None, garage_ok=False, street_src='mapped'):
     """Doors on this building: mapped entrance nodes, then footpaths that end at the wall, else (for larger
     buildings) the middle of the longest wall facing the nearest street. Returns [x, y, z, ry, width, kind]."""
     ext = poly.exterior
@@ -295,7 +295,7 @@ def entrances(poly, ways, nodes, roads_xy, terr, big, drive_xy=None, garage_ok=F
             face = (nx * vx + nz * vz) / vl
             score = face * min(L, 60) / (1 + d[k] / 200)
             if best is None or score > best[0]: best = (score, mx, mz)
-        if best and best[0] > 0: add(best[1], best[2], 'inferred-street')
+        if best and best[0] > 0: add(best[1], best[2], 'inferred-street' if street_src == 'mapped' else 'inferred-street-paving')
     # garage doors: where estimated paving (a driveway) meets a wall of a house-sized building along >= 9 ft.
     # Evidence: paved cells within 5 ft outside the wall; the door is centred on the paved stretch.
     if garage_ok and drive_xy is not None and len(drive_xy):

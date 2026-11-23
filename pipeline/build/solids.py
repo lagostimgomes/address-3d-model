@@ -452,7 +452,7 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
             above = d > 3.0
             coh = RF.coherent_share(rp[above], r) if above.any() else 0.0
             p90 = float(np.percentile(below, 90)) if (above.mean() <= 0.3 and coh <= 0.12) else float(np.percentile(np.abs(d), 90))
-            if med > 1.0 or p90 > 3.0: ok = False; break
+            if med > 1.0 or p90 > 3.0 or math.hypot(pl[0], pl[1]) > RF.MAX_SLOPE: ok = False; break
             total += RF.score_of(med, 3, len(rp))
             subs.append((r, pl, len(rp), med, p90, float(np.percentile(d, 10)), float(np.percentile(d, 90))))
         if not ok or total + math.log(n_all) * 6 >= env_score:

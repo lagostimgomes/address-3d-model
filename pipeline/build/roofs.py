@@ -194,6 +194,15 @@ def score_of(med, k, n):
     return n * math.log(med ** 2 + 0.01) + k * math.log(max(n, 2)) * 2
 
 
+MAX_SLOPE = 2.0     # rise/run. PROVISIONAL (roof-slope audit, Codex 2026-11-23): of 146 fitted planes in six cases only one
+                    # exceeded 2 (8.8, a 37 ft2 sliver, held-out median 10.4 ft); the next highest was 1.30. No labelled
+                    # mansard/spire subset exists yet, so this bound is a development rule, not a validated one.
+
+
+def plausible(f):
+    return all(math.hypot(a, b) <= MAX_SLOPE for a, b, _ in (f.planes or []))
+
+
 def select(pts, poly, gate_median=1.0, gate_p90=3.0, eaves=None):
     """Pick the candidate with the lowest penalised robust score, n*log(MAD^2 + eps) + k*log(n)*2.
     Returns (fit, stats) with stats = {kind, median_abs, p90_abs, n, alternatives}. If even the best candidate
@@ -215,11 +224,12 @@ def select(pts, poly, gate_median=1.0, gate_p90=3.0, eaves=None):
         below = np.maximum(0, -d)
         clutter_ok = above.mean() <= 0.3 and coh <= 0.12
         p90 = float(np.percentile(below, 90)) if clutter_ok else float(np.percentile(r, 90))
-        ok = med <= gate_median and p90 <= gate_p90
-        scored.append(dict(score=score, fit=f, med=med, p90=p90, ok=ok,
+        steep = not plausible(f)
+        ok = med <= gate_median and p90 <= gate_p90 and not steep
+        scored.append(dict(steep=steep, score=score, fit=f, med=med, p90=p90, ok=ok,
                            tails=(float(np.percentile(d, 10)), float(np.percentile(d, 90))), above=float(above.mean()), coherent=coh))
     scored.sort(key=lambda t: t['score'])
-    alts = [dict(kind=t['fit'].kind, median_abs=round(t['med'], 2), passes=t['ok']) for t in scored[:5]]
+    alts = [dict(kind=t['fit'].kind, median_abs=round(t['med'], 2), passes=t['ok'], **({'rejected': f'slope over {MAX_SLOPE} (provisional bound)'} if t['steep'] else {})) for t in scored[:5]]
     passing = [t for t in scored if t['ok']]
     best = scored[0]
     if not passing:
