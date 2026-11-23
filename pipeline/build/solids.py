@@ -444,7 +444,9 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         if k is None: continue
         blk = int(math.floor(x / HOLDOUT_BLOCK)) * 100003 + int(math.floor(z / HOLDOUT_BLOCK))
         heldout.setdefault(f'p{k}', []).append([round(float(x), 2), round(float(y), 2), round(float(z), 2), blk])
-    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()), heldout=heldout)
+    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()), heldout=heldout,
+                snap=dict(n=len(mesh_parts.snap_moves), max_ft=max(mesh_parts.snap_moves, default=0.0), units='ft',
+                          note='height reconciliation where two parts meet on a crossing or within 0.1 ft of one'))
 
 
 def mesh_parts(parts, terr, cut_lines=()):
@@ -467,7 +469,7 @@ def mesh_parts(parts, terr, cut_lines=()):
     lines = unary_union([p_['poly'].boundary for p_ in parts] + face_lines)
     for _ in range(2):                    # merge nodes closer than 0.12 ft (clipping/cleanup jogs), then re-node
         lines = unary_union(shapely.set_precision(snap(lines, lines, 0.12), 0.01))
-    cells = [c for c in polygonize(lines) if c.area > 1e-4]
+    cells = [c for c in polygonize(lines) if c.area > 1e-9]          # tiny cells are merged below, never dropped (a dropped cell is a hole)
     part_index = shapely.STRtree([p_['poly'] for p_ in parts])
     def owner(x, z):
         pt = Point(x, z)
@@ -476,7 +478,10 @@ def mesh_parts(parts, terr, cut_lines=()):
         return None
     hcache = {}
     def hfun(k, x, z):
-        key = (round(x, 3), round(z, 3))
+        # evaluate at the exported (0.01 ft) plan position: two computed positions that export to the same vertex must
+        # get the same height, or a steep plane turns a few thousandths of a foot into an open seam (review s2-native)
+        x, z = round(x, 2), round(z, 2)
+        key = (x, z)
         y = round(float(parts[k]['fit'].h(np.array([x]), np.array([z]))[0]), 2)
         for (k2, y2) in hcache.get(key, ()):
             if k2 == k: return y2
@@ -534,6 +539,25 @@ def mesh_parts(parts, terr, cut_lines=()):
                 edge_cells.setdefault(key, []).append((k, out_n))
     cuts = unary_union([g.buffer(0.4) for g in cut_lines]) if cut_lines else None
     EPS = 0.015
+    def hset(k, x, z, y):
+        key = (round(x, 2), round(z, 2))
+        hcache[key] = [(kk, yy) for kk, yy in hcache.get(key, ()) if kk != k] + [(k, y)]
+    # pre-pass: where two parts' surfaces cross within 0.1 ft of an edge end, the crossing is not inserted as a vertex,
+    # so both parts must take ONE height at that end; otherwise a steep plane leaves a sliver seam (review s2-native,
+    # Graceland). The lower value wins (the step disappears at that column); the displacement is reported.
+    snap_moves = []
+    for (a, b), sides in edge_cells.items():
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        if L < 1e-6 or len(sides) < 2: continue
+        k1, k2 = sides[0][0], sides[1][0]
+        if k1 == k2: continue
+        d0 = hfun(k1, *a) - hfun(k2, *a); d1 = hfun(k1, *b) - hfun(k2, *b)
+        if (d0 > EPS and d1 < -EPS) or (d0 < -EPS and d1 > EPS):
+            t = d0 / (d0 - d1)
+            end = a if t * L < 0.1 else b if (1 - t) * L < 0.1 else None
+            if end is not None:
+                y1, y2 = hfun(k1, *end), hfun(k2, *end); y = min(y1, y2)
+                hset(k1, *end, y); hset(k2, *end, y); snap_moves.append(round(abs(y1 - y2), 3))
     quads, crossings, base = [], {}, []
     for (a, b), sides in edge_cells.items():
         L = math.hypot(b[0] - a[0], b[1] - a[1])
@@ -561,6 +585,13 @@ def mesh_parts(parts, terr, cut_lines=()):
                 else:
                     spans = [(0.0, t)] if d0 > 0 else [(t, 1.0)]
                     crossings.setdefault((a, b), []).append(t)
+                    # the crossing is exported on the 0.01 ft grid; on a steep plane that rounding alone changes the
+                    # height by several hundredths, so both parts take ONE height there (the mean of the two)
+                    qx, qz = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+                    yk, yj = hfun(k, qx, qz), hfun(j, qx, qz)
+                    if yk != yj:
+                        ym = round((yk + yj) / 2, 2); hset(k, qx, qz, ym); hset(j, qx, qz, ym)
+                        snap_moves.append(round(abs(yk - yj) / 2, 3))
             for t0, t1 in spans:
                 q0 = (a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0)
                 q1 = (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1)
@@ -637,6 +668,7 @@ def mesh_parts(parts, terr, cut_lines=()):
     mesh = dict(roof=roof.pack(), roof_flat=roof_flat.pack(), walls=walls.pack(), section=section.pack(), base=base)
     raw = dict(roof=roof.p, roof_flat=roof_flat.p, walls=walls.p, section=section.p)
     mesh_parts.owner = owner
+    mesh_parts.snap_moves = snap_moves
     return mesh, raw, hfun, part_index, other
 
 

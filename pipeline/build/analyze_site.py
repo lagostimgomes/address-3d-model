@@ -971,6 +971,7 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
                 mesh=R['mesh'], windows=wins, doors=doors, parts=parts_ev,
                 _heldout=R['heldout'],
                 validation=dict(heldout_points=R['holdout_n'],
+                                seam_reconciliation=R.get('snap'),
                                 heldout_parts=len(ho), underpowered_parts=sum(1 for h in ho if h['underpowered']) + sum(1 for p_ in R['parts'] if not p_['stats']['heldout']['n'])),
                 provenance=dict(heights='measured', roof='measured parts' if 'envelope' not in kinds else 'measured parts; some envelopes',
                                 windows='generated', doors=sorted({d[5] for d in doors})))
