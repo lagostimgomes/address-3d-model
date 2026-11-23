@@ -954,13 +954,14 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
         st = p_['stats']
         parts_ev.append(dict(id=f'p{i}', kind=st['kind'], area_ft2=st.get('area_ft2'),
                              status='measured' if st['kind'] not in ('envelope', 'insufficient') else 'default',
-                             method='roof primitive selection (penalised robust fit)' if st['kind'] != 'envelope' else 'envelope: none of the implemented roof shapes passed the residual gate',
+                             method={'envelope': 'envelope: none of the implemented roof shapes passed the residual gate',
+                                     'planar-brep': 'piecewise-planar roof: one supported plane, joints on plane intersections'}.get(st['kind'], 'roof primitive selection (penalised robust fit)'),
                              reason=st.get('reason'),
                              support=dict(n=st.get('n'), coverage=st.get('coverage'), density=st.get('density'),
                                           residual=dict(stat='median_abs', value=st.get('median_abs'), units='ft') if st.get('median_abs') is not None else None),
                              heldout=st['heldout'], alternatives=st.get('alternatives', [])))
     cen = pg.centroid
-    pitched = [p_ for p_ in R['parts'] if p_['stats']['kind'] in ('gable', 'hip', 'hipped', 'shed', 'dome')]
+    pitched = [p_ for p_ in R['parts'] if p_['stats']['kind'] in ('gable', 'hip', 'hipped', 'shed', 'dome', 'planar-brep')]
     return dict(type='mesh', mesh_v=3, x=round(cen.x, 2), z=round(cen.y, 2), rot=0.0, grade=round(grade, 2),
                 w=round(pg.bounds[2] - pg.bounds[0], 1), d=round(pg.bounds[3] - pg.bounds[1], 1),
                 wall_h=round(eave, 1), eave_h=round(eave, 1), ridge_h=round(top, 1), area_ft2=round(pg.area),

@@ -397,6 +397,44 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
                                underpowered=bool(len(vr) < 50)),
                   coverage=None if cov is None else round(cov, 3), density=round(len(pts) / max(pp.area, 1), 3), area_ft2=round(pp.area))
         parts.append(dict(poly=pp, fit=fit, stats=st))
+    # S2.3: an envelope part gets one more chance as a support-constrained planar B-rep; accepted only if every plane
+    # region passes the residual gate and the penalised score beats the envelope's
+    expanded = []
+    for prt in parts:
+        st = prt['stats']
+        if st['kind'] != 'envelope' or prt['poly'].area < 2 * MIN_PART_FT2:
+            expanded.append(prt); continue
+        res = brep_split(prt['poly'], T, pg)
+        if not res:
+            expanded.append(prt); continue
+        pts_all = _pts_in(prt['poly'], T)
+        n_all = max(len(pts_all), 2)
+        env_med = float(np.median(np.abs(pts_all[:, 1] - np.median(pts_all[:, 1])))) if len(pts_all) else 99.0
+        env_score = RF.score_of(env_med, 1, n_all)
+        subs, total, ok = [], 0.0, True
+        for r, pl, n in res:
+            rp = _pts_in(r, T)
+            if len(rp) < RF.MIN_PTS: ok = False; break
+            d = rp[:, 1] - (pl[0] * rp[:, 0] + pl[1] * rp[:, 2] + pl[2])
+            med = float(np.median(np.abs(d))); below = np.maximum(0, -d)
+            above = d > 3.0
+            coh = RF.coherent_share(rp[above], r) if above.any() else 0.0
+            p90 = float(np.percentile(below, 90)) if (above.mean() <= 0.3 and coh <= 0.12) else float(np.percentile(np.abs(d), 90))
+            if med > 1.0 or p90 > 3.0: ok = False; break
+            total += RF.score_of(med, 3, len(rp))
+            subs.append((r, pl, len(rp), med, p90, float(np.percentile(d, 10)), float(np.percentile(d, 90))))
+        if not ok or total + math.log(n_all) * 6 >= env_score:
+            prt['stats']['brep'] = 'tried: rejected (a region failed the gate or the score did not beat the envelope)'
+            expanded.append(prt); continue
+        for r, pl, n, med, p90, t10, t90 in subs:
+            f = RF.Fit('planar-brep', [tuple(pl)], 3)
+            vin = shapely.contains_xy(r, V[:, 0], V[:, 2]) if len(V) else np.zeros(0, bool)
+            expanded.append(dict(poly=r, fit=f, stats=dict(kind='planar-brep', median_abs=round(med, 2), p90_abs=round(p90, 2),
+                signed_p10=round(t10, 2), signed_p90=round(t90, 2), n=int(n), area_ft2=round(r.area),
+                heldout=dict(n=int(vin.sum()), median_abs=None, p90_abs=None, units='ft', underpowered=bool(vin.sum() < 50)),
+                coverage=None, density=round(n / max(r.area, 1), 3),
+                reason='one plane of a piecewise-planar roof (support-constrained, joints on plane intersections)')))
+    parts = expanded
     mesh, raw, hfun, part_index, other = mesh_parts(parts, terr, cut_lines)
     owner = mesh_parts.owner
     # withheld points for the exported-surface check (gates.py), by FINAL part and spatial block
@@ -645,3 +683,102 @@ def openings(pg, R, terr, doors, use):
                     if j is None and any(math.hypot(px - d[0], pz - d[2]) < d[4] / 2 + ww / 2 + 1.5 and sill < d[1] + 9 for d in doors): continue
                     wins.append([round(px + nx * 0.06, 2), round(sill + wh / 2, 2), round(pz + nz * 0.06, 2), round(ry, 4), ww, wh])
     return wins, fh, base
+
+
+# ------------------------------------------------------------------ S2.3 planar B-rep fallback
+def brep_split(pp, T, pg, cell=None):
+    """Support-constrained piecewise-planar roof for a part no primitive explains (review R2, F1).
+    1. Robust height raster of the part's own training returns; region-growing plane segmentation; coplanar merge;
+       planes with too little support are absorbed by neighbours.
+    2. One polygon per plane region, simplified together as a coverage (shared boundaries identical), clipped to the
+       part.
+    3. Joints: a boundary vertex shared by exactly two regions moves onto the line where their planes intersect,
+       when that line passes within reach and the planes agree there (a ridge or valley); a vertex shared by three
+       regions moves to the least-squares meeting point of their three lines. Elsewhere the boundary is a step
+       (a wall). Only adjacent supported planes are ever intersected.
+    Returns [(polygon, plane (a, b, c), n_points)] or None."""
+    import analyze_site as A
+    from scipy import ndimage
+    pts = _pts_in(pp, T)
+    if len(pts) < 40: return None
+    if cell is None: cell = max(1.5, min(3.0, 1.2 / math.sqrt(max(len(pts) / pp.area, 1e-3))))
+    P4 = np.c_[pts, np.ones(len(pts))]
+    G, H = height_raster(pp, P4, cell)
+    have = G['inside'] & ~np.isnan(H)
+    if have.sum() < 12: return None
+    idx = ndimage.distance_transform_edt(~have, return_distances=False, return_indices=True)
+    Hf = np.where(G['inside'], ndimage.median_filter(H[tuple(idx)], size=3), np.nan)
+    label, planes = A.segment_heights(np.nan_to_num(Hf), G['inside'], G['GX'], G['GZ'])
+    if (label == 0).any() and (label > 0).any():
+        idx = ndimage.distance_transform_edt(label == 0, return_distances=False, return_indices=True)
+        label = np.where(G['inside'], label[tuple(idx)], 0)
+    L0 = np.where(G['inside'], label - 1, -1)
+    if L0.max() < 1: return None                        # one plane: the primitives already covered it
+    lab, planes = A.merge_coplanar(np.where(L0 < 0, 0, L0), planes, np.nan_to_num(Hf), G['inside'], G['GX'], G['GZ'])
+    lab = np.where(G['inside'], lab, -1)
+    lab = np.where(G['inside'], A.absorb_fragments(np.where(lab < 0, 0, lab), min_cells=int(math.ceil(60 / cell ** 2))), -1)
+    ks = [k for k in np.unique(lab) if k >= 0]
+    if len(ks) < 2 or len(ks) > 24: return None
+    # region polygons from cells, simplified as one coverage
+    c = G['cell']; cen, ux, vx = G['cen'], G['ux'], G['vx']
+    def cellpoly(i, j):
+        u0 = G['u0'] + j * c; v0 = G['v0'] + i * c
+        q = [(u0, v0), (u0 + c, v0), (u0 + c, v0 + c), (u0, v0 + c)]
+        return Polygon([(cen[0] + a * ux[0] + b * vx[0], cen[1] + a * ux[1] + b * vx[1]) for a, b in q])
+    regs = [unary_union([cellpoly(i, j) for i, j in zip(*np.nonzero(lab == k))]).buffer(0) for k in ks]
+    regs = list(shapely.coverage_simplify(np.array(regs, dtype=object), tolerance=max(1.0, c * 0.8), simplify_boundary=False))
+    regs = [max(polys(r.intersection(pp)), key=lambda q: q.area) if polys(r.intersection(pp)) else None for r in regs]
+    keep = [(r, k) for r, k in zip(regs, ks) if r is not None and r.area > 20]
+    if len(keep) < 2: return None
+    regs = [r for r, _ in keep]; PL = [tuple(planes[k]) for _, k in keep]
+    # vertex -> regions using it
+    use = {}
+    for ri, r in enumerate(regs):
+        for x, z in list(r.exterior.coords)[:-1]: use.setdefault((round(x, 6), round(z, 6)), set()).add(ri)
+    boundary = pp.boundary
+    reach = max(2.0, 2 * c)
+    moved = {}
+    def line(i, j):
+        (a1, b1, c1), (a2, b2, c2) = PL[i], PL[j]
+        return a1 - a2, b1 - b2, c1 - c2                 # (A, B, C): A x + B z + C = 0
+    for key, rs in use.items():
+        x, z = key
+        if boundary.distance(Point(x, z)) < 0.05: continue          # the part outline itself never moves
+        rs = sorted(rs)
+        if len(rs) == 2:
+            A_, B_, C_ = line(*rs); nrm = math.hypot(A_, B_)
+            if nrm < 1e-6: continue
+            d = (A_ * x + B_ * z + C_) / nrm
+            if abs(d) <= reach:
+                nx_, nz_ = x - A_ / nrm * d, z - B_ / nrm * d
+                moved[key] = (nx_, nz_)
+        elif len(rs) >= 3:
+            rows = [line(rs[0], rs[1]), line(rs[1], rs[2]), line(rs[0], rs[2])]
+            M = np.array([[A_, B_] for A_, B_, _ in rows]); rhs = -np.array([C_ for _, _, C_ in rows])
+            if np.linalg.matrix_rank(M) < 2: continue
+            sol, *_ = np.linalg.lstsq(M, rhs, rcond=None)
+            if math.hypot(sol[0] - x, sol[1] - z) <= reach: moved[key] = (float(sol[0]), float(sol[1]))
+    def mv(r):
+        ext = [moved.get((round(x, 6), round(z, 6)), (x, z)) for x, z in list(r.exterior.coords)[:-1]]
+        q = Polygon(ext).buffer(0)
+        return q
+    regs2 = [mv(r) for r in regs]
+    # keep the result a coverage of the part: clip, then give any uncovered area to the most similar neighbour
+    regs2 = [max(polys(r.intersection(pp)), key=lambda q: q.area) if polys(r.intersection(pp)) else None for r in regs2]
+    if any(r is None for r in regs2): return None
+    for i in range(len(regs2)):
+        for j in range(i):
+            regs2[i] = regs2[i].difference(regs2[j])
+    regs2 = [max(polys(r), key=lambda q: q.area) if polys(r) else None for r in regs2]
+    if any(r is None or r.area < 10 for r in regs2): return None
+    rest = pp.difference(unary_union(regs2))
+    for r in polys(rest):
+        if r.area < 0.5: continue
+        k = max(range(len(regs2)), key=lambda t: regs2[t].intersection(r.buffer(0.05)).area)
+        regs2[k] = unary_union([regs2[k], r]).buffer(0)
+    out = []
+    for r, pl in zip(regs2, PL):
+        r = max(polys(r), key=lambda q: q.area)
+        n = int(shapely.contains_xy(r, pts[:, 0], pts[:, 2]).sum())
+        out.append((r, pl, n))
+    return out
