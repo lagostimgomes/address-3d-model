@@ -771,6 +771,25 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     # ---- build every included building
     blds, edge_touch, cut_ids = [], [], []
     xs_all, zs_all = X[nonb], Z[nonb]
+    # neighbourhood context for the type prior: the typical height and footprint of the OTHER buildings on the site
+    ctx_h, ctx_a = [], []
+    ys_all = Y[nonb]
+    for b_ in inc:
+        bx0, bz0, bx1, bz1 = b_['poly'].bounds
+        sel_ = (xs_all > bx0) & (xs_all < bx1) & (zs_all > bz0) & (zs_all < bz1)
+        ins_ = np.where(sel_)[0][shapely.contains_xy(b_['poly'], xs_all[sel_], zs_all[sel_])]
+        if len(ins_) >= 20:
+            c_ = b_['poly'].centroid
+            ctx_h.append((float(np.percentile(ys_all[ins_], 98)) - float(terr(c_.x, c_.y)), b_['poly'].area))
+        ctx_a.append(b_['poly'].area)
+    def _wmed(pairs):                                      # area-weighted median: large buildings define the fabric
+        pairs = sorted(pairs); tot = sum(a for _, a in pairs); acc = 0.0
+        for v, a in pairs:
+            acc += a
+            if acc >= tot / 2: return v
+    context = dict(buildings=len(inc), median_height_ft=round(float(_wmed(ctx_h)), 1) if ctx_h else None,
+                   median_footprint_ft2=round(float(np.median(ctx_a))) if ctx_a else None,
+                   note='height median is footprint-area weighted')
     for k, b in enumerate(sorted(inc, key=lambda b: b is not feat)):
         is_feat = b is feat
         bid = 'featured' if is_feat else f'b{len(blds) - 1 if blds else 0}'
@@ -791,7 +810,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
         Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
         # one route for every building (user, 2026-11-23): explicit solids, so every model is gated the same way
-        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy, 'mapped' if rx else 'paving-estimate')
+        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy, 'mapped' if rx else 'paving-estimate', front_of(pg), context)
         hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
                   provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
                                   outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))
@@ -825,7 +844,9 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     fp = feat['poly']
     outline = [[round(x_, 1), round(z_, 1)] for x_, z_ in fp.exterior.coords[:-1]]
     fh_ = next((h for h in blds if h['id'] == 'featured'), None)
-    if fh_ and fh_['roof']['type'] in ('gable', 'hip', 'flat') and b_outline_is_measured(feat):
+    if fh_ and fh_.get('footprint'):
+        outline = fh_['footprint']                         # the built footprint (template-regularised when chosen)
+    elif fh_ and fh_['roof']['type'] in ('gable', 'hip', 'flat') and b_outline_is_measured(feat):
         # a measured (LiDAR) outline also takes in decks and porches; for a house, outline the measured body
         c_, s_ = math.cos(fh_['rot']), math.sin(fh_['rot']); hw, hd = fh_['w'] / 2 + 1, fh_['d'] / 2 + 1
         outline = [[round(fh_['x'] + lx * c_ + lz * s_, 1), round(fh_['z'] - lx * s_ + lz * c_, 1)]
@@ -929,17 +950,91 @@ def absorb_fragments(L, min_cells):
     return L
 
 
-def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO, drive_xy=None, street_src='mapped'):
+HOUSE_TAGS = {'house', 'detached', 'semidetached_house', 'bungalow', 'cabin', 'farm', 'residential_house'}
+BLOCK_TAGS = {'apartments', 'commercial', 'retail', 'office', 'industrial', 'warehouse', 'school', 'university', 'college',
+              'church', 'cathedral', 'hospital', 'hotel', 'civic', 'public', 'government', 'train_station', 'stadium', 'dormitory',
+              'kindergarten', 'supermarket', 'parking', 'garages', 'terrace', 'townhouse'}
+
+
+def classify_type(tags, pg, Pp, terr, context=None):
+    """Building type prior from computable signals (user decision 2026-11-23). Map tags decide when specific; otherwise
+    size and measured height. Returns an evidence record (C1). Neighbourhood context is not used yet."""
+    t = (tags or {}).get('building')
+    sig = dict(building_tag=t, area_ft2=round(pg.area))
+    if t in HOUSE_TAGS: return dict(type='house', status='mapped', method='OSM building tag', signals=sig)
+    if t in BLOCK_TAGS: return dict(type='block', status='mapped', method='OSM building tag', signals=sig)
+    if len(Pp):
+        g = float(np.median(terr(*np.array(pg.exterior.coords).T)))
+        top = float(np.percentile(Pp[:, 1], 98)) - g; sig['height_ft'] = round(top, 1)
+    else: top = None
+    rect = pg.minimum_rotated_rectangle; sig['rectangularity'] = round(pg.area / max(rect.area, 1), 2)
+    ctx = context or {}; sig['context'] = ctx
+    residential_fabric = (ctx.get('median_height_ft') is None or ctx['median_height_ft'] <= 45) and \
+                         (ctx.get('median_footprint_ft2') is None or ctx['median_footprint_ft2'] <= 5000)
+    house = 500 <= pg.area <= 3500 and top is not None and 10 <= top <= 42 and residential_fabric
+    return dict(type='house' if house else 'block', status='inferred',
+                method='footprint 500-3500 ft2, measured height 10-42 ft, and neighbours of house scale (median height <= 45 ft, '
+                       'median footprint <= 5000 ft2) => detached house; otherwise block (provisional rule)',
+                signals=sig)
+
+
+def typed_house_defaults(R, doors, front, terr):
+    """Typical features of a detached house, drawn as LABELLED DEFAULTS (status 'default': typical for the type, not
+    observed). Evidence replaces them: a garage door inferred from a driveway suppresses the default garage.
+    - front door: a stoop (concrete pad and step);
+    - garage: one door (two if the street wall is >= 44 ft) at the street-wall end away from the front door, on a main
+      block whose street wall is >= 26 ft."""
+    from shapely.geometry import Point
+    defaults = []
+    for d in doors:
+        if d[5] in ('inferred-street', 'inferred-street-paving', 'mapped', 'inferred-path') and len(d) == 6:
+            d.append('stoop'); defaults.append(dict(feature='stoop', status='default', method='typical for a detached house'))
+    if any(d[5] == 'inferred-driveway' for d in doors): return doors, defaults
+    main = max(R['parts'], key=lambda p_: p_['poly'].area)['poly']
+    co = list(main.exterior.coords); best = None
+    for (x0, z0), (x1, z1) in zip(co[:-1], co[1:]):
+        L = math.hypot(x1 - x0, z1 - z0)
+        if L < 26: continue
+        tx, tz = (x1 - x0) / L, (z1 - z0) / L; nx, nz = tz, -tx
+        if main.contains(Point((x0 + x1) / 2 + nx * 0.5, (z0 + z1) / 2 + nz * 0.5)): nx, nz = -nx, -nz
+        f = nx * front[0] + nz * front[1]
+        if best is None or f > best[0]: best = (f, x0, z0, tx, tz, nx, nz, L)
+    if best is None or best[0] < 0.5: return doors, defaults
+    f, x0, z0, tx, tz, nx, nz, L = best
+    fd = next((d for d in doors if d[5] != 'inferred-driveway'), None)
+    tdoor = ((fd[0] - x0) * tx + (fd[2] - z0) * tz) if fd else L * 0.3
+    n = 2 if L >= 44 else 1; gw = 8.6; zone = n * (gw + 1.2)
+    c = (L - 2.0 - zone / 2) if tdoor < L / 2 else (2.0 + zone / 2)
+    if fd is not None and abs(c - tdoor) < zone / 2 + 3: return doors, defaults
+    for k in range(n):
+        t = c + (k - (n - 1) / 2) * (gw + 1.2)
+        px, pz = x0 + tx * t, z0 + tz * t
+        doors.append([round(px, 2), round(float(terr(px + nx * 2, pz + nz * 2)), 2), round(pz, 2), round(math.atan2(nx, nz), 4), gw, 'default-garage'])
+    defaults.append(dict(feature='garage door', count=n, status='default', method='typical for a detached house whose street wall is >= 26 ft; replaced by driveway evidence when found'))
+    return doors, defaults
+
+
+def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO, drive_xy=None, street_src='mapped', front=(0.0, 1.0), context=None):
     """Any building that is not a simple house: explicit parts with fitted roof primitives (solids.py), one
     consistent exterior, openings on exposed walls, plain doors labelled with their evidence (C1-C3)."""
     import solids as SO
     import shapely
     seed = abs(hash(tuple(np.round(pg.centroid.coords[0], 1)))) % 100000
-    R = SO.build(pg, Pp, terr, seed=seed, cut_lines=cut_lines)
+    btype = classify_type(tags, pg, Pp, terr, context)
+    R = SO.build(pg, Pp, terr, seed=seed, cut_lines=cut_lines, btype=btype, front=tuple(front))
+    if R.get('template') and R['template']['status'] == 'chosen':
+        # the template regularised the walls: doors, windows and the outline follow the built footprint
+        from shapely.ops import unary_union
+        fin = unary_union([p_['poly'] for p_ in R['parts']]).buffer(0)
+        fin = max(GEO.as_polys(fin), key=lambda q: q.area, default=None)
+        if fin is not None: pg = fin
     grade = float(np.median(terr(*np.array(pg.exterior.coords).T)))
     big = pg.area > 1800
     use = tags.get('building') or ('house' if pg.area < 2500 else 'yes')
     doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big, drive_xy=drive_xy, garage_ok=pg.area < 4000, street_src=street_src)
+    defaults = []
+    if btype['type'] == 'house' and R.get('template') and R['template']['status'] == 'chosen':
+        doors, defaults = typed_house_defaults(R, doors, front, terr)
     wins, fh, base = SO.openings(pg, R, terr, doors, use)
     # summary heights from the reconstructed parts (area-weighted)
     tops, eaves_, areas = [], [], []
@@ -975,7 +1070,8 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
                 roof=dict(type='parts', kinds=kinds, parts=len(R['parts']), planes=len(R['parts']),
                           pitch_deg=0.0 if not pitched else None),
                 mesh=R['mesh'], windows=wins, doors=doors, parts=parts_ev,
-                _heldout=R['heldout'],
+                _heldout=R['heldout'], building_type=btype, template=R.get('template'), defaults=defaults,
+                footprint=[[round(x_, 1), round(z_, 1)] for x_, z_ in pg.exterior.coords[:-1]],
                 validation=dict(heldout_points=R['holdout_n'],
                                 seam_reconciliation=R.get('snap'),
                                 heldout_parts=len(ho), underpowered_parts=sum(1 for h in ho if h['underpowered']) + sum(1 for p_ in R['parts'] if not p_['stats']['heldout']['n'])),

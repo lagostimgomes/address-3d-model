@@ -358,7 +358,7 @@ def densify_ring(poly, step):
     return shapely.segmentize(poly, step)
 
 
-def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, use='yes', GEO=None):
+def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, use='yes', GEO=None, btype=None, front=(0.0, 1.0)):
     """Reconstruct one building. P: Nx4 (x, y, z, n_returns) roof-candidate points inside the footprint.
     Returns dict(mesh=..., parts=[...], windows, doors, validation) or None if there is no usable evidence."""
     test = holdout_mask(P[:, 0], P[:, 2], seed) if len(P) else np.zeros(0, bool)
@@ -429,6 +429,32 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
                 parts = [x for t, x in enumerate(parts) if t not in (i, j)] + [m]
                 changed = True; break
             if changed: break
+    # TYPE PRIOR (user decision 2026-11-23): a building typed as a detached house also gets the house TEMPLATE as a
+    # candidate decomposition - a regularised main block plus wings, roofs fitted to the LiDAR - selected on training
+    # data only. Area the template does not cover stays as measured parts. The data-driven parts remain the fallback.
+    template_rec = None
+    if btype and btype.get('type') == 'house' and not cut_lines and len(T):
+        tpl = house_template(pg, T, terr, front)
+        if tpl is not None:
+            core, rest = tpl['core'], tpl['rest']
+            tparts = [make_part(q) for q in core]
+            ok_core = all(q['stats']['kind'] not in ('envelope', 'insufficient') for q in tparts)
+            def wmad(ps):
+                ns = [q['stats'].get('n') or 0 for q in ps]; ms = [q['stats'].get('median_abs') for q in ps]
+                pairs = [(n_, m_) for n_, m_ in zip(ns, ms) if m_ is not None and n_]
+                return sum(n_ * m_ for n_, m_ in pairs) / max(sum(n_ for n_, _ in pairs), 1) if pairs else 99.0
+            dd = [q for q in parts if q['poly'].intersects(unary_union(core))]
+            t_mad, d_mad = wmad(tparts), wmad(dd)
+            accept = ok_core and t_mad <= 1.25 * d_mad + 0.15
+            template_rec = dict(type='house', status='chosen' if accept else 'rejected', core_parts=len(core), rest_parts=len(rest),
+                                training_mad_ft=round(t_mad, 2), data_driven_mad_ft=round(d_mad, 2),
+                                rule='template chosen if every core part passes the gate and its training residual is within '
+                                     '1.25x + 0.15 ft of the data-driven parts over the same area (a calculated bet; held-out '
+                                     'accuracy is measured separately)',
+                                reason=None if accept else ('a template part failed the gate' if not ok_core else 'training residual too much worse than the data-driven parts'))
+            if accept:
+                for q in tparts: q['stats']['template'] = 'house'
+                parts = tparts + [make_part(q) for q in rest]
     # S2.3: an envelope part gets one more chance as a support-constrained planar B-rep; accepted only if every plane
     # region passes the residual gate and the penalised score beats the envelope's
     expanded = []
@@ -476,7 +502,7 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         if k is None: continue
         blk = int(math.floor(x / HOLDOUT_BLOCK)) * 100003 + int(math.floor(z / HOLDOUT_BLOCK))
         heldout.setdefault(f'p{k}', []).append([round(float(x), 2), round(float(y), 2), round(float(z), 2), blk])
-    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()), heldout=heldout,
+    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()), heldout=heldout, template=template_rec,
                 snap=dict(n=len(mesh_parts.snap_moves), max_ft=max(mesh_parts.snap_moves, default=0.0), units='ft',
                           note='height reconciliation where two parts meet on a crossing or within 0.1 ft of one'))
 
@@ -846,3 +872,47 @@ def brep_split(pp, T, pg, cell=None):
         n = int(shapely.contains_xy(r, pts[:, 0], pts[:, 2]).sum())
         out.append((r, pl, n))
     return out
+
+
+# ------------------------------------------------------------------ type templates
+def house_template(pg, T, terr, front):
+    """Detached-house template: a regularised main block (oriented by the main roof's downslope, sized from the upper
+    roof planes) plus wings where cross gables extend past it. Returns dict(core=[polys], rest=[polys]) or None.
+    Measurements come from the LiDAR (analyze_site.measure_building); only the SHAPE family is assumed."""
+    import analyze_site as A
+    sP = T[T[:, 3] <= 1][:, :3] if (T[:, 3] <= 1).sum() >= 60 else T[:, :3]
+    if len(sP) < 60: return None
+    try:
+        planes = A.ransac_planes(sP)
+        res = A.measure_building(sP, planes, terr, tuple(front))
+    except Exception:
+        return None
+    if not res: return None
+    hh = res[0]
+    if hh['roof']['type'] == 'flat': return None
+    cx, cz, rot, w, d = hh['x'], hh['z'], hh['rot'], hh['w'], hh['d']
+    def rect(x0, x1, z0, z1):
+        return Polygon([A.to_world(x, z, cx, cz, rot) for x, z in ((x0, z0), (x1, z0), (x1, z1), (x0, z1))])
+    main = rect(-w / 2, w / 2, -d / 2, d / 2)
+    # the template must describe THIS footprint: most of it inside the measured outline and covering most of it
+    if main.intersection(pg).area < 0.75 * main.area or main.intersection(pg).area < 0.6 * pg.area: return None
+    core = [main]
+    along_x = hh['roof'].get('ridge_axis') == 'x'
+    for c in hh['roof'].get('cross', []):
+        a0, a1 = c['pos'] - c['span'] / 2, c['pos'] + c['span'] / 2
+        b0, b1 = c['from'], c['to']
+        wing = rect(a0, a1, b0, b1) if along_x else rect(b0, b1, a0, a1)
+        wing = wing.difference(unary_union(core))
+        wing = max(polys(wing), key=lambda q: q.area) if polys(wing) else None
+        if wing is not None and wing.area >= 40 and wing.intersection(pg).area >= 0.7 * wing.area: core.append(wing)
+    covered = unary_union(core)
+    # what the template leaves: thin strips (eave overhang, outline slop) are dropped; a compact remainder at least
+    # 6 ft wide is a real structure (porch, garage, extension) and stays as measured parts
+    left = pg.difference(covered)
+    opened = left.buffer(-3.0, join_style=2).buffer(3.0, join_style=2).intersection(left)
+    rest = [q for q in polys(opened) if q.area >= MIN_PART_FT2 and len(_pts_in(q, T)) >= RF.MIN_PTS]
+    # re-grow each kept piece through the dropped strip so it stays attached to the block it belongs to
+    rest = [left.intersection(q.buffer(3.5, join_style=2)) for q in rest]
+    rest = [q.difference(covered) for q in rest]
+    rest = [max(polys(q), key=lambda r: r.area) for q in rest if polys(q)]
+    return dict(core=core, rest=rest, measured=hh)
