@@ -146,3 +146,21 @@ imagery credentials or owner/occupant lookups in this code.
 
 Tests: `python -m unittest discover -s pipeline/fetch -p 'test_*.py' -v` and
 `python -m unittest discover -s pipeline/osm -p 'test_*.py' -v`.
+
+## D1 map reliability
+
+OSM requests use POST, fail over across the configured interpreters, then make at
+most one delayed retry pass for network/transient HTTP errors. A 60 second elapsed
+budget is checked between requests; each request has a timeout and responses have
+a 32 MiB cap. This is not a hard process deadline for a slowly streaming response.
+Permanent HTTP errors and incomplete/remark responses are not retried on the same
+endpoint. Numeric Retry-After values beyond the remaining budget skip the retry.
+
+Successful live responses write `osm-response-cache.json` with the exact query,
+coordinate frame, original acquisition time and SHA256 of `osm-raw.json`. After a
+failed live refresh, only an exact, checksum-valid raw cache is normalized again,
+explicitly marked `stale` / `validated-raw-cache`; even an earlier empty response
+remains stale evidence, not a fresh absence observation. Explicit `--raw-json`
+replay stays `cached-input`. Changed frames/queries or modified raw bytes cannot
+use this cache. Legacy normalized evidence retains the prior stale behavior when
+no frame was recorded; it is not promoted to a verified raw-cache acquisition.

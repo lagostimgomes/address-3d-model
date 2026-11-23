@@ -3,6 +3,8 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
+from io import BytesIO
 from unittest.mock import patch
 
 import fetch_osm as osm
@@ -19,6 +21,58 @@ def way(i,points,tags):
 
 
 class OSMTests(unittest.TestCase):
+    def test_post_failover_and_transient_retry(self):
+        err=urllib.error.HTTPError('https://example.test',503,'busy',{},None)
+        with patch.object(osm,'ENDPOINTS',['https://a.test','https://b.test']), patch.object(osm.time,'sleep') as sleep, \
+             patch.object(osm.urllib.request,'urlopen',side_effect=[err,err,BytesIO(b'{"elements":[]}')]) as call:
+            data,url=osm.overpass('query',[])
+        self.assertEqual(url,'https://a.test')
+        self.assertEqual(data,{'elements':[]})
+        self.assertEqual(call.call_args_list[0].args[0].get_method(),'POST')
+        self.assertEqual(call.call_args_list[0].args[0].data,b'data=query')
+        sleep.assert_called_once_with(2.0)
+
+    def test_permanent_http_and_partial_results_not_retried(self):
+        err=urllib.error.HTTPError('https://example.test',400,'bad query',{},None)
+        with patch.object(osm,'ENDPOINTS',['https://a.test','https://b.test']), patch.object(osm.time,'sleep') as sleep, \
+             patch.object(osm.urllib.request,'urlopen',side_effect=[err,BytesIO(b'{"elements":[],"remark":"timeout"}')]) as call:
+            with self.assertRaises(RuntimeError): osm.overpass('query',[])
+        self.assertEqual(call.call_count,2); sleep.assert_not_called()
+
+    def test_rate_limit_cooldown_outside_budget_not_retried(self):
+        err=urllib.error.HTTPError('https://example.test',429,'busy',{'Retry-After':'120'},None)
+        with patch.object(osm,'ENDPOINTS',['https://a.test']), patch.object(osm.time,'sleep') as sleep, \
+             patch.object(osm.urllib.request,'urlopen',side_effect=err) as call:
+            with self.assertRaises(RuntimeError): osm.overpass('query',[])
+        self.assertEqual(call.call_count,1); sleep.assert_not_called()
+
+    def test_validated_raw_cache_preserves_empty_result_as_stale(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            with patch.object(osm,'overpass',return_value=({'elements':[]},'https://a.test')):
+                fresh=osm.fetch_features(SITE,folder)
+            acquired=fresh['acquisition']['acquired_utc']
+            (folder/'features.json').unlink()
+            with patch.object(osm,'overpass',side_effect=OSError('offline')):
+                stale=osm.fetch_features(SITE,folder)
+            self.assertEqual(stale['status'],'stale')
+            self.assertEqual(stale['endpoint'],'validated-raw-cache')
+            self.assertEqual(stale['acquisition']['acquired_utc'],acquired)
+            self.assertEqual(stale['buildings'],[])
+
+    def test_raw_cache_rejects_different_frame_and_tampered_response(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder=Path(temp)
+            with patch.object(osm,'overpass',return_value=({'elements':[]},'https://a.test')):
+                osm.fetch_features(SITE,folder)
+            with patch.object(osm,'overpass',side_effect=OSError('offline')):
+                other=osm.fetch_features(dict(SITE,mercator_center=[1,1]),folder)
+            self.assertEqual(other['status'],'unavailable')
+            (folder/'osm-raw.json').write_text('{"elements":[],"changed":true}')
+            with patch.object(osm,'overpass',side_effect=OSError('offline')):
+                invalid=osm.fetch_features(SITE,folder)
+            self.assertEqual(invalid['status'],'unavailable')
+
     def test_multipolygon_reversed_members_holes_and_no_duplicate_members(self):
         a=[[-20,-20],[20,-20],[20,20]]
         b=[[-20,-20],[-20,20],[20,20]]

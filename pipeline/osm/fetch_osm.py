@@ -6,11 +6,14 @@ No status-endpoint gate. Failures are explicit; missing mapping is never lawn.
 """
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 from pathlib import Path
 import re
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -22,6 +25,8 @@ ENDPOINTS = ['https://overpass-api.de/api/interpreter',
              'https://overpass.private.coffee/api/interpreter']
 R = 6378137.0
 FT = 1 / .3048
+NETWORK_BUDGET_SECONDS = 60.0
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 
 def to_model(lat, lon, site):
@@ -49,22 +54,71 @@ def query_for(site, radius_m=350, bounds_ft=None):
 
 
 def overpass(query, log):
+    """POST with bounded failover; retry transient failures only after a first pass."""
     last = None
+    deadline = time.monotonic() + NETWORK_BUDGET_SECONDS
+    retry = []
+    cooldown = 2.0
     for url in ENDPOINTS:
+        if time.monotonic() >= deadline: break
         try:
-            req = urllib.request.Request(url+'?'+urllib.parse.urlencode({'data':query}),
-                                         headers={'User-Agent':'address-3d-model/2.0'})
-            with urllib.request.urlopen(req,timeout=25) as response:
-                raw = response.read()
+            req = urllib.request.Request(url, data=urllib.parse.urlencode({'data':query}).encode(),
+                                         headers={'User-Agent':'address-3d-model/2.1',
+                                                  'Content-Type':'application/x-www-form-urlencoded'})
+            with urllib.request.urlopen(req,timeout=max(.1,min(25,deadline-time.monotonic()))) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES: raise ValueError('Overpass response exceeds byte budget')
             result = json.loads(raw)
             if result.get('remark') or not isinstance(result.get('elements'),list):
                 raise ValueError('Incomplete Overpass response: '+str(result.get('remark','missing elements')))
-            log.append(f'GET {url} -> {len(raw)} bytes')
+            log.append(f'POST {url} -> {len(raw)} bytes')
             return result,url
         except Exception as exc:
             last = exc
-            log.append(f'GET {url} failed: {type(exc).__name__}: {exc}')
+            log.append(f'POST {url} failed: {type(exc).__name__}: {exc}')
+            if isinstance(exc,(urllib.error.URLError,TimeoutError)):
+                if not isinstance(exc,urllib.error.HTTPError) or exc.code in (408,429,500,502,503,504):
+                    retry.append(url)
+                    if isinstance(exc,urllib.error.HTTPError) and exc.code == 429:
+                        try: cooldown=max(cooldown,float(exc.headers.get('Retry-After',15)))
+                        except (ValueError,TypeError): cooldown=max(cooldown,15)
+    # No immediate same-endpoint hammering; a second pass shares the original time budget.
+    remaining=deadline-time.monotonic()
+    if retry and cooldown < remaining:
+        time.sleep(cooldown)
+        for url in retry:
+            if time.monotonic() >= deadline: break
+            try:
+                req=urllib.request.Request(url,data=urllib.parse.urlencode({'data':query}).encode(),
+                    headers={'User-Agent':'address-3d-model/2.1','Content-Type':'application/x-www-form-urlencoded'})
+                with urllib.request.urlopen(req,timeout=max(.1,min(20,deadline-time.monotonic()))) as response:
+                    raw=response.read(MAX_RESPONSE_BYTES+1)
+                if len(raw)>MAX_RESPONSE_BYTES: raise ValueError('Overpass response exceeds byte budget')
+                result=json.loads(raw)
+                if result.get('remark') or not isinstance(result.get('elements'),list):
+                    raise ValueError('Incomplete Overpass response')
+                log.append(f'POST {url} retry -> {len(raw)} bytes')
+                return result,url
+            except Exception as exc:
+                last=exc
+                log.append(f'POST {url} retry failed: {type(exc).__name__}: {exc}')
     raise RuntimeError(f'All Overpass interpreters failed: {last}')
+
+
+def cache_key(site,query):
+    return dict(query=query,lat=site['lat'],lon=site['lon'],mercator_center=site['mercator_center'])
+
+
+def load_response_cache(folder,key):
+    """Only the exact query/frame and checksum may reuse an acquired raw response."""
+    meta=json.loads((folder/'osm-response-cache.json').read_text(encoding='utf-8'))
+    raw=(folder/'osm-raw.json').read_bytes()
+    if meta.get('key') != key or hashlib.sha256(raw).hexdigest() != meta.get('sha256'):
+        raise ValueError('Raw cache query/frame or checksum does not match')
+    data=json.loads(raw)
+    if data.get('remark') or not isinstance(data.get('elements'),list):
+        raise ValueError('Raw cache incomplete')
+    return data,meta
 
 
 def closed_rings(parts):
@@ -219,6 +273,9 @@ def fetch_features(site,folder,radius_m=350,raw_json=None):
     folder=Path(folder)
     query=query_for(site,radius_m,site.get('bounds_ft'))
     log=[f'query: {query}']
+    key=cache_key(site,query)
+    cache_meta=None
+    refresh_error=None
     try:
         if raw_json:
             data=json.loads(Path(raw_json).read_text(encoding='utf-8'))
@@ -226,21 +283,40 @@ def fetch_features(site,folder,radius_m=350,raw_json=None):
             if data.get('remark') or not isinstance(data.get('elements'),list):
                 raise ValueError('Cached Overpass response is incomplete')
         else:
-            data,endpoint=overpass(query,log)
+            try:
+                data,endpoint=overpass(query,log)
+            except Exception as exc:
+                refresh_error=str(exc)
+                try:
+                    data,cache_meta=load_response_cache(folder,key)
+                    endpoint='validated-raw-cache'
+                    log.append('Refresh failed; using checksum-verified raw cache for the exact query/frame')
+                except (OSError,ValueError,KeyError,TypeError):
+                    raise RuntimeError(refresh_error) from exc
         result=normalize(data,site)
         write_json(folder/'osm-raw.json',data)
         result.update(endpoint=endpoint,query=query,log=log)
+        if endpoint not in ('cached-input','validated-raw-cache'):
+            cache_meta=dict(key=key,sha256=hashlib.sha256((folder/'osm-raw.json').read_bytes()).hexdigest(),
+                            acquired_utc=datetime.now(timezone.utc).isoformat(),endpoint=endpoint)
+            write_json(folder/'osm-response-cache.json',cache_meta)
+        result['acquisition']=dict(frame=key,acquired_utc=(cache_meta or {}).get('acquired_utc'),
+                                   cache_fallback=endpoint=='validated-raw-cache')
+        if refresh_error:
+            result.update(status='stale',error=refresh_error)
+            result['notes'].append('Live refresh failed; using earlier raw mapped evidence, not a fresh acquisition')
     except Exception as exc:
         result=dict(schema_version=1,status='unavailable',error=str(exc),
                     buildings=[],surfaces=[],ways=[],entrances=[],notes=[str(exc)],log=log)
     prior=folder/'features.json'
     if prior.exists():
         old=json.loads(prior.read_text(encoding='utf-8'))
-        if result['status']=='unavailable' and old.get('buildings'):
+        compatible=(old.get('query') in (None,query) and old.get('acquisition',{}).get('frame',key)==key)
+        if result['status']=='unavailable' and old.get('buildings') and compatible:
             error=result['error']
             result=dict(old,status='stale',error=error,refresh_log=log,
                         notes=old.get('notes',[])+['Refresh failed; retaining prior mapped evidence: '+error])
-        if old.get('coverage'): result['coverage']=old['coverage']
+        if old.get('coverage') and compatible: result['coverage']=old['coverage']
     write_json(prior,result)
     meta={k:result[k] for k in ('status','log','endpoint','query','error') if k in result}
     meta.update(source='OpenStreetMap via Overpass',license='ODbL; (c) OpenStreetMap contributors')
