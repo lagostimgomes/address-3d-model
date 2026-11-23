@@ -375,7 +375,14 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         parts.append(dict(poly=pp, fit=fit, stats=st))
     mesh, raw, hfun, part_index, other = mesh_parts(parts, terr, cut_lines)
     owner = mesh_parts.owner
-    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()))
+    # withheld points for the exported-surface check (gates.py), by FINAL part and spatial block
+    heldout = {}
+    for x, y, z in V[:, :3] if len(V) else []:
+        k = owner(x, z)
+        if k is None: continue
+        blk = int(math.floor(x / HOLDOUT_BLOCK)) * 100003 + int(math.floor(z / HOLDOUT_BLOCK))
+        heldout.setdefault(f'p{k}', []).append([round(float(x), 2), round(float(y), 2), round(float(z), 2), blk])
+    return dict(parts=parts, mesh=mesh, raw=raw, hfun=hfun, part_index=part_index, other=other, owner=owner, holdout_n=int(test.sum()), heldout=heldout)
 
 
 def mesh_parts(parts, terr, cut_lines=()):

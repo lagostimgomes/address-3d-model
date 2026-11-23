@@ -847,6 +847,9 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                              source='mapped' if roads_xy is not None else ('lidar-intensity' if pave else 'none')),
                  site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=pave,
                  featured_basis=feat_basis, candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
+    # withheld roof points go to a sidecar for gates.py, never into the page
+    ho = {hh['id']: hh.pop('_heldout') for hh in blds if '_heldout' in hh}
+    json.dump(ho, open(os.path.join(folder, 'heldout.json'), 'w'), separators=(',', ':'))
     json.dump(scene, open(os.path.join(folder, 'scene.json'), 'w'), separators=(',', ':'))
     if verbose:
         for hh in blds:
@@ -951,7 +954,7 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
         st = p_['stats']
         parts_ev.append(dict(id=f'p{i}', kind=st['kind'], area_ft2=st.get('area_ft2'),
                              status='measured' if st['kind'] not in ('envelope', 'insufficient') else 'default',
-                             method='roof primitive selection (penalised robust fit)' if st['kind'] != 'envelope' else 'envelope: no primitive passed the residual gate',
+                             method='roof primitive selection (penalised robust fit)' if st['kind'] != 'envelope' else 'envelope: none of the implemented roof shapes passed the residual gate',
                              reason=st.get('reason'),
                              support=dict(n=st.get('n'), coverage=st.get('coverage'), density=st.get('density'),
                                           residual=dict(stat='median_abs', value=st.get('median_abs'), units='ft') if st.get('median_abs') is not None else None),
@@ -965,6 +968,7 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
                 roof=dict(type='parts', kinds=kinds, parts=len(R['parts']), planes=len(R['parts']),
                           pitch_deg=0.0 if not pitched else None),
                 mesh=R['mesh'], windows=wins, doors=doors, parts=parts_ev,
+                _heldout=R['heldout'],
                 validation=dict(heldout_points=R['holdout_n'],
                                 heldout_parts=len(ho), underpowered_parts=sum(1 for h in ho if h['underpowered']) + sum(1 for p_ in R['parts'] if not p_['stats']['heldout']['n'])),
                 provenance=dict(heights='measured', roof='measured parts' if 'envelope' not in kinds else 'measured parts; some envelopes',
