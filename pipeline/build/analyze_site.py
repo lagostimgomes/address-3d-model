@@ -922,118 +922,53 @@ def absorb_fragments(L, min_cells):
 
 
 def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO):
-    """Any building that is not a simple house: roof planes measured from LiDAR inside the footprint,
-    meshed exactly to the footprint, with walls on the outline, doors and windows."""
-    from scipy import ndimage
+    """Any building that is not a simple house: explicit parts with fitted roof primitives (solids.py), one
+    consistent exterior, openings on exposed walls, plain doors labelled with their evidence (C1-C3)."""
+    import solids as SO
     import shapely
-    mrr = pg.minimum_rotated_rectangle; co = list(mrr.exterior.coords)
-    e1 = (co[1][0] - co[0][0], co[1][1] - co[0][1]); e2 = (co[2][0] - co[1][0], co[2][1] - co[1][1])
-    ex = e1 if math.hypot(*e1) >= math.hypot(*e2) else e2
-    ang = math.atan2(ex[1], ex[0])
-    ca, sa = math.cos(ang), math.sin(ang)
-    area = pg.area
-    cell = 2.0 if area < 12000 else (2.5 if area < 60000 else 3.0)
-    puv = shapely.transform(pg, lambda c: np.c_[c[:, 0] * ca + c[:, 1] * sa, -c[:, 0] * sa + c[:, 1] * ca])
-    u0, v0, u1, v1 = puv.bounds; u0 -= cell; v0 -= cell
-    Cn = int(math.ceil((u1 + cell - u0) / cell)); Rn = int(math.ceil((v1 + cell - v0) / cell))
-    gu = u0 + (np.arange(Cn) + .5) * cell; gv = v0 + (np.arange(Rn) + .5) * cell
-    GU, GV = np.meshgrid(gu, gv)
-    mask = shapely.contains_xy(puv.buffer(cell * 0.75), GU, GV)
-    support = b['support']
-    hgt = np.full((Rn, Cn), np.nan)
-    if len(Pp):
-        pu = Pp[:, 0] * ca + Pp[:, 2] * sa; pv = -Pp[:, 0] * sa + Pp[:, 2] * ca
-        j = np.clip(((pu - u0) / cell).astype(int), 0, Cn - 1); i = np.clip(((pv - v0) / cell).astype(int), 0, Rn - 1)
-        sg = Pp[:, 3] <= 1
-        hgt = np.full((Rn, Cn), np.nan)
-        if sg.any():            # median of single returns per cell: antennas and rooftop clutter do not lift the roof
-            key = i[sg] * Cn + j[sg]; ys = Pp[sg, 1]; o_ = np.lexsort((ys, key)); key, ys = key[o_], ys[o_]
-            st_ = np.r_[0, np.nonzero(np.diff(key))[0] + 1]; en_ = np.r_[st_[1:], len(key)]
-            med = ys[(st_ + en_ - 1) // 2]
-            hgt.flat[key[st_]] = med
-        # cells with only multi-echo returns (roof edges under branches): the lower quartile, so canopy above
-        # the roof does not lift it; cells whose value sits far off every neighbour are dropped later by the
-        # median filter and plane fit
-        mi = ~sg
-        if mi.any():
-            order = np.lexsort((Pp[mi, 1], i[mi] * Cn + j[mi]))
-            ii, jj, yy = i[mi][order], j[mi][order], Pp[mi, 1][order]
-            key = ii * Cn + jj
-            starts = np.r_[0, np.nonzero(np.diff(key))[0] + 1]; ends = np.r_[starts[1:], len(key)]
-            for s0, e0 in zip(starts, ends):
-                r_, c_ = ii[s0], jj[s0]
-                if np.isnan(hgt[r_, c_]): hgt[r_, c_] = yy[s0 + (e0 - s0) // 4]
-    have = ~np.isnan(hgt) & mask
+    seed = abs(hash(tuple(np.round(pg.centroid.coords[0], 1)))) % 100000
+    R = SO.build(pg, Pp, terr, seed=seed, cut_lines=cut_lines)
     grade = float(np.median(terr(*np.array(pg.exterior.coords).T)))
-    heights_src = 'measured'
-    if support < 0.25 or have.sum() < 12:
-        # mapped footprint without LiDAR support: height from tags, else one generic storey count
-        try: ht = float(str(tags.get('height', '')).split()[0]) * 3.28084
-        except ValueError: ht = None
-        lv = tags.get('building:levels')
-        try: lv = float(lv)
-        except (TypeError, ValueError): lv = None
-        top = ht or (lv * 12 if lv else 14.0); heights_src = 'mapped' if (ht or lv) else 'default'
-        hgt = np.full((Rn, Cn), grade + top)
-    else:
-        idx = ndimage.distance_transform_edt(~have, return_distances=False, return_indices=True)
-        hgt = hgt[tuple(idx)]
-        hgt = np.where(mask, ndimage.median_filter(hgt, size=3), hgt)
-    from analyze_site import segment_heights  # noqa (same module when run as a script)
-    label, planes = segment_heights(hgt, mask, GU, GV)
-    if (label == 0).any():
-        idx = ndimage.distance_transform_edt(label == 0, return_distances=False, return_indices=True)
-        label = label[tuple(idx)]
-    label = label - 1
-    label, planes = merge_coplanar(label, planes, hgt, mask, GU, GV)
-    # Plane boundaries from region growing sit a coarse cell or two off the true ridge, hip, valley and
-    # step lines. On a finer raster, each cell takes the plane (among those of nearby coarse cells) closest
-    # to the measured roof height interpolated there: ridges land where the planes meet, and steps follow
-    # the measured edge instead of a coarse staircase.
-    fine = 0.5 if area < 8000 else (0.75 if area < 25000 else (1.0 if area < 60000 else 1.5))
-    k = int(round(cell / fine)); fine = cell / k
-    Rf, Cf = Rn * k, Cn * k
-    fi = (np.arange(Rf) + .5) / k - .5; fj = (np.arange(Cf) + .5) / k - .5
-    FI, FJ = np.meshgrid(fi, fj, indexing='ij')
-    meas = ndimage.map_coordinates(np.where(mask, ndimage.gaussian_filter(hgt, 0.7), hgt), [FI, FJ], order=1, mode='nearest')
-    FU = u0 + (FJ + .5) * cell; FV = v0 + (FI + .5) * cell
-    PL = np.asarray(planes, float)
-    ci = np.clip(np.floor(FI + .5).astype(int), 0, Rn - 1); cj = np.clip(np.floor(FJ + .5).astype(int), 0, Cn - 1)
-    best = label[ci, cj]; err = np.abs(PL[best, 0] * FU + PL[best, 1] * FV + PL[best, 2] - meas)
-    for oi in range(-2, 3):
-        for oj in range(-2, 3):
-            ln = label[np.clip(ci + oi, 0, Rn - 1), np.clip(cj + oj, 0, Cn - 1)]
-            e = np.abs(PL[ln, 0] * FU + PL[ln, 1] * FV + PL[ln, 2] - meas)
-            best = np.where(e < err, ln, best); err = np.minimum(e, err)
-    for _ in range(2):           # drop single-cell speckle: the most common label among the 3 x 3 neighbours
-        pad = np.pad(best, 1, mode='edge')
-        stack = np.stack([pad[1 + a_:1 + a_ + Rf, 1 + b_:1 + b_ + Cf] for a_ in (-1, 0, 1) for b_ in (-1, 0, 1)])
-        cnt = (stack[:, None] == stack[None, :]).sum(0)
-        best = np.take_along_axis(stack, cnt.argmax(0)[None], 0)[0]
-    best = absorb_fragments(best, min_cells=int(math.ceil(60 / fine ** 2)))
-    pl = GEO.Planes(best, planes, ang, u0, v0, fine)
-    # a mostly flat roof: low-slope planes on it are rooftop equipment, drains and crickets, not shingled roof
-    slope = np.hypot(PL[best, 0], PL[best, 1])
-    if (slope < GEO.FLAT).mean() >= 0.6: pl.flat_thr = math.tan(math.radians(18))
-    meshes, profile = GEO.roof_and_walls(pg, pl, terr, cut_lines=cut_lines)
-    big = area > 1800
+    big = pg.area > 1800
     doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big)
-    use = tags.get('building') or ('house' if area < 2500 else 'yes')
-    wins, fh, base = GEO.facade(pg, pl, terr, profile, doors, use)
-    tops = np.array([PL[label[i_, j_], 0] * GU[i_, j_] + PL[label[i_, j_], 1] * GV[i_, j_] + PL[label[i_, j_], 2] for i_, j_ in zip(*np.nonzero(mask))])
-    eave = float(np.percentile(tops, 15) - grade); top = float(np.percentile(tops, 99.5) - grade)
-    slopes = [(math.degrees(math.atan(math.hypot(a_, b_))), int((best == k_).sum())) for k_, (a_, b_, _) in enumerate(planes)]
-    pitched = [(s_, n_) for s_, n_ in slopes if s_ > 8 and n_ > 0]
-    pitch = float(np.average([s_ for s_, _ in pitched], weights=[n_ for _, n_ in pitched])) if pitched else 0.0
+    use = tags.get('building') or ('house' if pg.area < 2500 else 'yes')
+    wins, fh, base = SO.openings(pg, R, terr, doors, use)
+    # summary heights from the reconstructed parts (area-weighted)
+    tops, eaves_, areas = [], [], []
+    for prt in R['parts']:
+        c_ = prt['poly'].representative_point()
+        x0_, z0_, x1_, z1_ = prt['poly'].bounds
+        gx, gz = np.meshgrid(np.linspace(x0_, x1_, 12), np.linspace(z0_, z1_, 12))
+        ins = shapely.contains_xy(prt['poly'], gx, gz)
+        hv = prt['fit'].h(gx[ins], gz[ins]) if ins.any() else prt['fit'].h(np.array([c_.x]), np.array([c_.y]))
+        tops.append(float(np.max(hv))); eaves_.append(float(np.min(hv))); areas.append(prt['poly'].area)
+    top = max(tops) - grade
+    eave = float(np.average(eaves_, weights=areas)) - grade
+    kinds = sorted({p_['stats']['kind'] for p_ in R['parts']})
+    ho = [p_['stats']['heldout'] for p_ in R['parts'] if p_['stats']['heldout']['n']]
+    parts_ev = []
+    for i, p_ in enumerate(R['parts']):
+        st = p_['stats']
+        parts_ev.append(dict(id=f'p{i}', kind=st['kind'], area_ft2=st.get('area_ft2'),
+                             status='measured' if st['kind'] not in ('envelope', 'insufficient') else 'default',
+                             method='roof primitive selection (penalised robust fit)' if st['kind'] != 'envelope' else 'envelope: no primitive passed the residual gate',
+                             reason=st.get('reason'),
+                             support=dict(n=st.get('n'), coverage=st.get('coverage'), density=st.get('density'),
+                                          residual=dict(stat='median_abs', value=st.get('median_abs'), units='ft') if st.get('median_abs') is not None else None),
+                             heldout=st['heldout'], alternatives=st.get('alternatives', [])))
     cen = pg.centroid
-    return dict(type='mesh', x=round(cen.x, 2), z=round(cen.y, 2), rot=round(-ang, 4), grade=round(grade, 2),
-                w=round(u1 - u0 - cell, 1), d=round(v1 - v0 - cell, 1), wall_h=round(eave, 1), eave_h=round(eave, 1),
-                ridge_h=round(top, 1), area_ft2=round(area), stories=max(1, int(round(max(eave, 8) / fh))), floor_h=fh,
-                roof=dict(type='grid', pitch_deg=round(pitch, 1), planes=len(planes)),
-                mesh=meshes, windows=wins, doors=doors,
-                provenance=dict(heights=heights_src, roof='measured' if heights_src == 'measured' else heights_src,
+    pitched = [p_ for p_ in R['parts'] if p_['stats']['kind'] in ('gable', 'hip', 'hipped', 'shed', 'dome')]
+    return dict(type='mesh', mesh_v=3, x=round(cen.x, 2), z=round(cen.y, 2), rot=0.0, grade=round(grade, 2),
+                w=round(pg.bounds[2] - pg.bounds[0], 1), d=round(pg.bounds[3] - pg.bounds[1], 1),
+                wall_h=round(eave, 1), eave_h=round(eave, 1), ridge_h=round(top, 1), area_ft2=round(pg.area),
+                stories=max(1, int(round(max(eave, 8) / fh))), floor_h=fh,
+                roof=dict(type='parts', kinds=kinds, parts=len(R['parts']), planes=len(R['parts']),
+                          pitch_deg=0.0 if not pitched else None),
+                mesh=R['mesh'], windows=wins, doors=doors, parts=parts_ev,
+                validation=dict(heldout_points=R['holdout_n'],
+                                heldout_parts=len(ho), underpowered_parts=sum(1 for h in ho if h['underpowered']) + sum(1 for p_ in R['parts'] if not p_['stats']['heldout']['n'])),
+                provenance=dict(heights='measured', roof='measured parts' if 'envelope' not in kinds else 'measured parts; some envelopes',
                                 windows='generated', doors=sorted({d[5] for d in doors})))
-
 
 def morphology_label_keep_large(M, G, min_ft2):
     from scipy import ndimage

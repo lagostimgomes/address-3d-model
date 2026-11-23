@@ -337,9 +337,9 @@ function wallMat(col){if(wallCache[col])return wallCache[col];const c=document.c
 const SECTION=new THREE.MeshStandardMaterial({roughness:1,side:THREE.DoubleSide,map:ctex(64,64,(g,W,H)=>{g.fillStyle='#ecebe6';g.fillRect(0,0,W,H);g.strokeStyle='#b9b6ad';g.lineWidth=3;for(let k=-W;k<W*2;k+=16){g.beginPath();g.moveTo(k,0);g.lineTo(k+H,H);g.stroke()}},4)});
 const FASCIA=new THREE.MeshStandardMaterial({color:new THREE.Color(0xe9e6df).convertSRGBToLinear(),roughness:.8,side:THREE.DoubleSide});
 const MEMBRANE=new THREE.MeshStandardMaterial({color:new THREE.Color(0xa7a9aa).convertSRGBToLinear(),roughness:.95,side:THREE.DoubleSide});
-const i16=b=>{const s=atob(b),u=new Uint8Array(s.length);for(let k=0;k<s.length;k++)u[k]=s.charCodeAt(k);return Float32Array.from(new Int16Array(u.buffer),v=>v/20)};
-function geo(m){if(!m||!m.n)return null;const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(i16(m.p),3));
-  if(m.uv)g.setAttribute('uv',new THREE.Float32BufferAttribute(i16(m.uv),2));
+const dec=(b,q)=>{const s=atob(b),u=new Uint8Array(s.length);for(let k=0;k<s.length;k++)u[k]=s.charCodeAt(k);return q?Float32Array.from(new Int32Array(u.buffer),v=>v/q):Float32Array.from(new Int16Array(u.buffer),v=>v/20)};
+function geo(m){if(!m||!m.n)return null;const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(dec(m.p,m.q),3));
+  if(m.uv)g.setAttribute('uv',new THREE.Float32BufferAttribute(dec(m.uv,m.q),2));
   if(m.nrm){const t=atob(m.nrm),a=new Float32Array(t.length);for(let k=0;k<t.length;k++){const v=t.charCodeAt(k);a[k]=(v>127?v-256:v)/127}g.setAttribute('normal',new THREE.Float32BufferAttribute(a,3))}else g.computeVertexNormals();return g}
 const WIN=[],DOORS=[];
 function buildMesh(H,wallCol){const g=new THREE.Group();g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;const M=H.mesh;
@@ -359,11 +359,11 @@ function finishOpenings(){
       put(i*3,-h/2-.12,w+.7,.3,.14);put(i*3+1,h/2+.14,w+.5,.36,.1);put(i*3+2,0,.22,h,.06)});
     gl.receiveShadow=true;fr.castShadow=false;scene.add(gl,fr);glows.push({material:glass})}
   const dn=DOORS.length;if(dn){const leaf=new THREE.MeshStandardMaterial({color:0x22282d,roughness:.25,metalness:.3,emissive:0xffd8a0,emissiveIntensity:0});
-    for(const [x,y,z,ry,w,kind] of DOORS){const g=new THREE.Group();g.position.set(x,y,z);g.rotation.y=ry;scene.add(g);
+    for(const [x,y,z,ry,w,kind,d6] of DOORS){const g=new THREE.Group();g.position.set(x,y,z);g.rotation.y=ry;scene.add(g);
       const h=w>5?8.5:7.2;mesh(new THREE.PlaneGeometry(w,h),leaf,0,h/2+.4,.08,g,false);
       box(w+.9,.5,.5,MAT.trim,0,h+.65,.15,g,false);for(const sx of[-1,1])box(.4,h+.4,.4,MAT.trim,sx*(w/2+.25),h/2+.4,.12,g,false);
       if(w>5)box(.12,h,.2,MAT.trim,0,h/2+.4,.12,g,false);
-      box(w+4,.45,4.2,MAT.conc,0,.2,2.1,g);if(w>5)box(w+3,.5,4,solid(0x3a3d40),0,h+2.2,2,g);
+      if(d6==='canopy'||d6==='portico'){box(w+4,.45,4.2,MAT.conc,0,.2,2.1,g);box(w+3,.5,4,solid(0x3a3d40),0,h+2.2,2,g)}   // assemblies only with geometric evidence (C3)
       glows.push({material:leaf})}}}
 S.houses.forEach((H,k)=>H.type==='mesh'?buildMesh(H,H.wall_color||'#cdc6b8'):H.roof.type==='grid'?buildGrid(H,H.wall_color||WALLS[(H.hash>>>0)%WALLS.length]):buildHouse(H));
 finishOpenings();
@@ -389,12 +389,15 @@ function show(id){const H=S.houses.find(h=>h.id===id);const F=H.role==='featured
   if(fx){const bits=[fx.summary,fx.wall&&`walls: ${fx.wall}`,fx.roof&&`roof: ${fx.roof}`,fx.style,fx.levels&&`${fx.levels} floors`].filter(Boolean);
     fe.innerHTML='';fe.append(document.createTextNode((fx.basis==='site'?'From sources about the campus/site: ':'From sources: ')+bits.join('; ')+'. '));
     (fx.sources||[]).slice(0,3).forEach((u,k)=>{const a=document.createElement('a');a.href=u;a.target='_blank';a.rel='noopener';a.textContent=`[${k+1}]`;fe.append(a,' ')})}else fe.textContent='';
-  const G=H.roof.type==='grid';
-  document.getElementById('stats').innerHTML=(G?[['Height',`${Math.round(H.ridge_h)} ft`],['Eaves',`${Math.round(H.wall_h)} ft`],['Roof area',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Pitch',H.roof.pitch_deg?`${Math.round(H.roof.pitch_deg)}°`:'flat']]
+  const G=H.roof.type==='grid'||H.roof.type==='parts';
+  document.getElementById('stats').innerHTML=(H.parts?[['Height',`${Math.round(H.ridge_h)} ft`],['Footprint',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Parts',H.parts.length],['Storeys',H.stories]]:G?[['Height',`${Math.round(H.ridge_h)} ft`],['Eaves',`${Math.round(H.wall_h)} ft`],['Roof area',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Pitch',H.roof.pitch_deg?`${Math.round(H.roof.pitch_deg)}°`:'flat']]
     :[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
   const cg=(H.roof.cross||[]).length;
   const pv=H.provenance||{},DK={mapped:'mapped entrance','inferred-path':'inferred: a mapped path ends at the wall','inferred-street':'inferred: faces the street'};
-  document.getElementById('look').textContent=G?`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; roof ${pv.heights==='measured'?`from ${H.roof.planes} measured planes`:pv.heights==='mapped'?'height from map tags (no LiDAR return)':'height unknown (generic)'}${H.clipped?'; cut at the '+(((S.coverage||{}).edge_touching||[]).includes(H.id)?'edge of the downloaded data':'site edge'):''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''} Windows are generated.`
+  const PK={flat:'flat',shed:'shed',gable:'gable',hip:'hip',hipped:'hipped',dome:'dome',envelope:'envelope (no simple shape fits; shown flat)'};
+  if(H.parts){const env=H.parts.filter(p=>p.kind==='envelope').length;
+    document.getElementById('look').textContent=`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; built from ${H.parts.length} parts fitted to LiDAR: ${[...new Set(H.parts.map(p=>PK[p.kind]||p.kind))].join(', ')}.${env?` ${env} part(s) are envelopes: the data did not support a roof shape there.`:''} Tallest point ${Math.round(H.ridge_h)} ft above grade.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+' (plain doors; no porch or canopy without evidence).':''} Windows are generated.`}
+  else document.getElementById('look').textContent=G?`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; roof ${pv.heights==='measured'?`from ${H.roof.planes} measured planes`:pv.heights==='mapped'?'height from map tags (no LiDAR return)':'height unknown (generic)'}${H.clipped?'; cut at the '+(((S.coverage||{}).edge_touching||[]).includes(H.id)?'edge of the downloaded data':'site edge'):''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''} Windows are generated.`
     :`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`;
   document.getElementById('site').textContent=`Shown: everything within ${S.buffer_ft} ft of the building — ${S.houses.length-1} other building${S.houses.length===2?'':'s'} and ${S.trees.length} trees.`}
 show(FEAT.id);
