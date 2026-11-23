@@ -1,3 +1,6 @@
 __pycache__/
 sites/
 *.laz
+cache/
+secrets/
+*.token
