@@ -133,7 +133,8 @@ def _fit_dome(pts, poly):
     if H <= 0.5: return None
     cx, cz = c.x, c.y
     f = lambda x, z: base + H * np.sqrt(np.clip(1 - np.clip(np.hypot(x - cx, z - cz) / R, 0, 1) ** 2, 0, 1))
-    return Fit('dome', [], 3, smooth=f)
+    fd = Fit('dome', [], 3, smooth=f); fd.meta = dict(rise_ft=round(float(H), 2), radius_ft=round(R, 2), rise_over_radius=round(float(H) / R, 3))
+    return fd
 
 
 def _fit_skeleton(pts, poly, eaves):
@@ -199,7 +200,16 @@ MAX_SLOPE = 2.0     # rise/run. PROVISIONAL (roof-slope audit, Codex 2026-11-23)
                     # mansard/spire subset exists yet, so this bound is a development rule, not a validated one.
 
 
+MAX_DOME_RISE = 1.5  # rise/radius for the elliptical dome cap. PROVISIONAL, separate from MAX_SLOPE (review s2-bound): a
+                     # dome's gradient is unbounded at its springing by construction, so a planar slope bound does not
+                     # apply; a hemisphere is 1.0, and stilted/onion profiles run higher. Needs the steep-roof subset.
+
+
 def plausible(f):
+    """Planar faces: rise/run <= MAX_SLOPE. Smooth surfaces get their own conditioning (dome: rise/radius)."""
+    if f.smooth is not None:
+        m = getattr(f, 'meta', None) or {}
+        return f.kind != 'dome' or m.get('rise_over_radius', 0) <= MAX_DOME_RISE
     return all(math.hypot(a, b) <= MAX_SLOPE for a, b, _ in (f.planes or []))
 
 
@@ -229,7 +239,7 @@ def select(pts, poly, gate_median=1.0, gate_p90=3.0, eaves=None):
         scored.append(dict(steep=steep, score=score, fit=f, med=med, p90=p90, ok=ok,
                            tails=(float(np.percentile(d, 10)), float(np.percentile(d, 90))), above=float(above.mean()), coherent=coh))
     scored.sort(key=lambda t: t['score'])
-    alts = [dict(kind=t['fit'].kind, median_abs=round(t['med'], 2), passes=t['ok'], **({'rejected': f'slope over {MAX_SLOPE} (provisional bound)'} if t['steep'] else {})) for t in scored[:5]]
+    alts = [dict(kind=t['fit'].kind, median_abs=round(t['med'], 2), passes=t['ok'], **({'rejected': (f'dome rise/radius over {MAX_DOME_RISE} (provisional bound)' if t['fit'].smooth is not None else f'slope over {MAX_SLOPE} (provisional bound)')} if t['steep'] else {})) for t in scored[:5]]
     passing = [t for t in scored if t['ok']]
     best = scored[0]
     if not passing:
@@ -242,4 +252,6 @@ def select(pts, poly, gate_median=1.0, gate_p90=3.0, eaves=None):
     t = passing[0]                                          # the best-scoring candidate that PASSES (R2)
     f, med, p90, sc = t['fit'], t['med'], t['p90'], t['score']
     return f, dict(kind=f.kind, median_abs=round(med, 2), p90_abs=round(p90, 2), n=int(n), alternatives=alts, score=sc,
-                   signed_p10=round(t['tails'][0], 2), signed_p90=round(t['tails'][1], 2), above_share=round(t['above'], 3), coherent_above=round(t['coherent'], 3))
+                   signed_p10=round(t['tails'][0], 2), signed_p90=round(t['tails'][1], 2), above_share=round(t['above'], 3), coherent_above=round(t['coherent'], 3),
+                   **({'shape': f.meta} if getattr(f, 'meta', None) else {}),
+                   plausibility=('dome rise/radius <= %s (provisional)' % MAX_DOME_RISE) if f.kind == 'dome' else ('planar faces rise/run <= %s (provisional)' % MAX_SLOPE))

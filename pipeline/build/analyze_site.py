@@ -964,7 +964,8 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
                              reason=st.get('reason'),
                              support=dict(n=st.get('n'), coverage=st.get('coverage'), density=st.get('density'),
                                           residual=dict(stat='median_abs', value=st.get('median_abs'), units='ft') if st.get('median_abs') is not None else None),
-                             heldout=st['heldout'], alternatives=st.get('alternatives', [])))
+                             heldout=st['heldout'], alternatives=st.get('alternatives', []),
+                             shape=st.get('shape'), plausibility=st.get('plausibility')))
     cen = pg.centroid
     pitched = [p_ for p_ in R['parts'] if p_['stats']['kind'] in ('gable', 'hip', 'hipped', 'shed', 'dome', 'planar-brep')]
     return dict(type='mesh', mesh_v=3, x=round(cen.x, 2), z=round(cen.y, 2), rot=0.0, grade=round(grade, 2),
