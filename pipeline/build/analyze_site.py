@@ -756,7 +756,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     # direction (its largest component) and gives driveway evidence for garage doors (other components)
     has_map_ground = bool(F.get('ways') or F.get('surfaces'))
     pave = None if has_map_ground else pavement(prim, G)
-    drive_xy = None
+    drive_xy = None; pave_roads_xy = None
     if pave is not None:
         from scipy import ndimage as _nd
         M_ = pavement.mask.copy()
@@ -767,7 +767,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
             drive_xy = np.c_[px_, pz_]
             if roads_xy is None:
                 bi, bj = np.nonzero(lab_ == big_); bx_, bz_ = G.xz(bi, bj)
-                roads_xy = np.c_[bx_, bz_][::4]
+                pave_roads_xy = np.c_[bx_, bz_][::4]
     # ---- build every included building
     blds, edge_touch, cut_ids = [], [], []
     xs_all, zs_all = X[nonb], Z[nonb]
@@ -809,8 +809,27 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         Ii = np.where(nonb)[0][sel]
         inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
         Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
-        # one route for every building (user, 2026-11-23): explicit solids, so every model is gated the same way
-        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy, 'mapped' if rx else 'paving-estimate', front_of(pg), context)
+        # Type prior (user, 2026-11-23): a building typed as a detached house uses the house model - per-house measurements
+        # (roof type, pitch, cross gables, hip ends, block size) rendered by the detailed house builder. If the measurement
+        # does not describe a simple house, or for any other type, the general solids method is used.
+        hh = None
+        btype = classify_type(tags, pg, Pp, terr, context)
+        if btype['type'] == 'house' and pg.area <= 3500 and b['support'] >= 0.5 and not cut_lines:
+            sP = Pp[Pp[:, 3] <= 1][:, :3]
+            if len(sP) >= 60:
+                planes = ransac_planes(sP)
+                c_ = dict(P=sP, planes=planes, rect=min_rect(sP[:, 0], sP[:, 2]))
+                res = measure_building(sP, planes, terr, front_of(pg))
+                hh = res[0] if res else None
+                if not house_like(c_, hh): hh = None
+                if hh:
+                    hh['outline_poly'] = [[round(x_, 2), round(z_, 2)] for x_, z_ in pg.exterior.coords[:-1]]
+                    hh['building_type'] = btype
+                    hh['model'] = dict(kind='house model', status='measured parameters, typical details',
+                                       note='roof type, pitch, cross gables, hip ends and block size are measured from LiDAR; '
+                                            'porch, garage, door, trim and siding are typical details for a house (defaults, not observed)')
+        if hh is None:
+            hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy if roads_xy is not None else pave_roads_xy, G, GEO, drive_xy, 'mapped' if rx else 'paving-estimate', front_of(pg), context)
         hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
                   provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
                                   outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))
