@@ -773,18 +773,8 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         Ii = np.where(nonb)[0][sel]
         inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
         Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
-        hh = None
-        if pg.area <= 3500 and b['support'] >= 0.5 and not cut_lines:
-            sP = Pp[Pp[:, 3] <= 1][:, :3]
-            if len(sP) >= 60:
-                planes = ransac_planes(sP)
-                c_ = dict(P=sP, planes=planes, rect=min_rect(sP[:, 0], sP[:, 2]))
-                res = measure_building(sP, planes, terr, front_of(pg))
-                hh = res[0] if res else None
-                if not house_like(c_, hh): hh = None
-                if hh: hh['outline_poly'] = [[round(x_, 2), round(z_, 2)] for x_, z_ in pg.exterior.coords[:-1]]
-        if hh is None:
-            hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO)
+        # one route for every building (user, 2026-11-23): explicit solids, so every model is gated the same way
+        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO)
         hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
                   provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
                                   outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))

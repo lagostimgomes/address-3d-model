@@ -373,11 +373,22 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         if share >= 0.85 or cell >= 4.5: break
         cell = min(4.5, cell * 1.25)
     G['measured_share'] = share
-    part_polys, meds = partition(pg, G, H)
-    # parts that no single primitive explains are split further by the best straight cut (recursive)
-    refined = []
-    for pp in part_polys: refined += refine_part(pp, T, pg=pg)
-    part_polys = clean_partition(refined, pg)
+    # simplest model first: if one primitive over the whole footprint passes the residual gate, the building is one
+    # part (a plain gable or hip house, a flat block). Otherwise partition by height steps, then split recursively.
+    whole = None
+    if len(T):
+        sW = T[T[:, 3] <= 1][:, :3]
+        uW = sW if len(sW) >= RF.MIN_PTS else T[:, :3]
+        fW, stW = RF.select(uW, pg, eaves=eaves_of(pg, pg))
+        if fW is not None and stW['kind'] not in ('envelope', 'insufficient'): whole = True
+    if whole:
+        part_polys, meds = [pg], [float(np.nanmedian(H))] if np.isfinite(H).any() else [np.nan]
+    else:
+        part_polys, meds = partition(pg, G, H)
+        # parts that no single primitive explains are split further by the best straight cut (recursive)
+        refined = []
+        for pp in part_polys: refined += refine_part(pp, T, pg=pg)
+        part_polys = clean_partition(refined, pg)
     parts = []
     for k, pp in enumerate(part_polys):
         inn = shapely.contains_xy(pp, T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)
