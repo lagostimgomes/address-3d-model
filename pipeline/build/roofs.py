@@ -178,6 +178,18 @@ def candidates(pts, poly, eaves=None):
     return out
 
 
+def coherent_share(pts, poly, cell=2.0):
+    """Largest connected patch of the given points (2 ft cells, 8-connected), as a share of the part's area."""
+    from scipy import ndimage
+    x0, z0, x1, z1 = poly.bounds
+    C = int((x1 - x0) / cell) + 2; R = int((z1 - z0) / cell) + 2
+    M = np.zeros((R, C), bool)
+    M[np.clip(((pts[:, 2] - z0) / cell).astype(int), 0, R - 1), np.clip(((pts[:, 0] - x0) / cell).astype(int), 0, C - 1)] = True
+    lab, n = ndimage.label(M, structure=np.ones((3, 3)))
+    if n == 0: return 0.0
+    return float(np.bincount(lab.ravel())[1:].max() * cell * cell / max(poly.area, 1.0))
+
+
 def score_of(med, k, n):
     return n * math.log(med ** 2 + 0.01) + k * math.log(max(n, 2)) * 2
 
@@ -196,19 +208,28 @@ def select(pts, poly, gate_median=1.0, gate_p90=3.0, eaves=None):
         r = np.abs(d)
         med = float(np.median(r))
         score = score_of(med, f.k, n)
-        # p90 is one-sided: points far ABOVE a roof (equipment, chimneys, overhanging trees) are allowed up to a
-        # share; points BELOW it mean the surface is wrong
+        # Points far ABOVE a roof are tolerated only as scattered clutter (equipment, chimneys, overhanging branches).
+        # A coherent raised area is a real higher roof that this candidate misses, so the candidate fails.
+        above = d > 3.0
+        coh = coherent_share(pts[above], poly) if above.any() else 0.0
         below = np.maximum(0, -d)
-        above_share = float(np.mean(d > 3.0))
-        p90 = float(np.percentile(below, 90)) if above_share <= 0.3 else float(np.percentile(r, 90))
-        scored.append((score, f, med, p90))
-    scored.sort(key=lambda t: t[0])
-    sc, f, med, p90 = scored[0]
-    alts = [dict(kind=g.kind, median_abs=round(m, 2)) for _, g, m, _ in scored[1:4]]
-    if med > gate_median or p90 > gate_p90:
+        clutter_ok = above.mean() <= 0.3 and coh <= 0.12
+        p90 = float(np.percentile(below, 90)) if clutter_ok else float(np.percentile(r, 90))
+        ok = med <= gate_median and p90 <= gate_p90
+        scored.append(dict(score=score, fit=f, med=med, p90=p90, ok=ok,
+                           tails=(float(np.percentile(d, 10)), float(np.percentile(d, 90))), above=float(above.mean()), coherent=coh))
+    scored.sort(key=lambda t: t['score'])
+    alts = [dict(kind=t['fit'].kind, median_abs=round(t['med'], 2), passes=t['ok']) for t in scored[:5]]
+    passing = [t for t in scored if t['ok']]
+    best = scored[0]
+    if not passing:
         env = _fit_flat(pts); env.kind = 'envelope'
-        r = np.abs(env.h(pts[:, 0], pts[:, 2]) - pts[:, 1])
-        return env, dict(kind='envelope', reason=f'best primitive {f.kind}: median {med:.2f} ft / p90 {p90:.2f} ft over the gate ({gate_median} / {gate_p90})',
-                         median_abs=round(float(np.median(r)), 2), p90_abs=round(float(np.percentile(r, 90)), 2), n=int(n), alternatives=alts,
-                         best=dict(kind=f.kind, score=sc))
-    return f, dict(kind=f.kind, median_abs=round(med, 2), p90_abs=round(p90, 2), n=int(n), alternatives=alts, score=sc)
+        dd = pts[:, 1] - env.h(pts[:, 0], pts[:, 2]); r = np.abs(dd)
+        return env, dict(kind='envelope', reason=f"none of the implemented shapes passed (best {best['fit'].kind}: median {best['med']:.2f} ft, p90 {best['p90']:.2f} ft; gate {gate_median}/{gate_p90})",
+                         median_abs=round(float(np.median(r)), 2), p90_abs=round(float(np.percentile(r, 90)), 2),
+                         signed_p10=round(float(np.percentile(dd, 10)), 2), signed_p90=round(float(np.percentile(dd, 90)), 2),
+                         n=int(n), alternatives=alts, best=dict(kind=best['fit'].kind, score=best['score']))
+    t = passing[0]                                          # the best-scoring candidate that PASSES (R2)
+    f, med, p90, sc = t['fit'], t['med'], t['p90'], t['score']
+    return f, dict(kind=f.kind, median_abs=round(med, 2), p90_abs=round(p90, 2), n=int(n), alternatives=alts, score=sc,
+                   signed_p10=round(t['tails'][0], 2), signed_p90=round(t['tails'][1], 2), above_share=round(t['above'], 3), coherent_above=round(t['coherent'], 3))

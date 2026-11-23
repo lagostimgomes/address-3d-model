@@ -67,40 +67,51 @@ def partition(pg, G, H):
     ins = G['inside']; have = ins & ~np.isnan(H)
     if have.sum() < 6:
         return [pg], [np.nan]
-    idx = ndimage.distance_transform_edt(~have, return_distances=False, return_indices=True)
-    Hf = ndimage.median_filter(H[tuple(idx)], size=3)
-    # connect 4-neighbours whose heights differ by less than STEP_FT, inside the footprint
-    R, C = Hf.shape
+    # smooth only among measured cells (a nan-aware 3x3 median), never across unmeasured gaps
+    Hm = np.where(have, H, np.nan)
+    pad = np.pad(Hm, 1, constant_values=np.nan)
+    stack = np.stack([pad[1 + a:1 + a + H.shape[0], 1 + b:1 + b + H.shape[1]] for a in (-1, 0, 1) for b in (-1, 0, 1)])
+    with np.errstate(all='ignore'):
+        Hs = np.where(have, np.nanmedian(stack, axis=0), np.nan)
+    R, C = Hs.shape
+    # connect 4-neighbours that are BOTH measured and differ by less than STEP_FT
     lab = -np.ones((R, C), int); n = 0
     from collections import deque
+    Hf = Hs
     for i0 in range(R):
         for j0 in range(C):
-            if not ins[i0, j0] or lab[i0, j0] >= 0: continue
+            if not have[i0, j0] or lab[i0, j0] >= 0: continue
             q = deque([(i0, j0)]); lab[i0, j0] = n
             while q:
                 i, j = q.popleft()
                 for a, b in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)):
-                    if 0 <= a < R and 0 <= b < C and ins[a, b] and lab[a, b] < 0 and abs(Hf[a, b] - Hf[i, j]) < STEP_FT:
+                    if 0 <= a < R and 0 <= b < C and have[a, b] and lab[a, b] < 0 and abs(Hf[a, b] - Hf[i, j]) < STEP_FT:
                         lab[a, b] = n; q.append((a, b))
             n += 1
+    # unmeasured footprint cells join the nearest labelled cell (labels only; heights are never filled)
+    if (ins & (lab < 0)).any() and (lab >= 0).any():
+        idx = ndimage.distance_transform_edt(lab < 0, return_distances=False, return_indices=True)
+        fill = lab[tuple(idx)]
+        lab = np.where(ins & (lab < 0), fill, lab)
+    Hf = np.where(have, Hf, np.nan)
     # small regions join the neighbour with the most similar height
     cell2 = G['cell'] ** 2
     for _ in range(4):
         sizes = np.bincount(lab[lab >= 0], minlength=n)
-        meds = {k: float(np.median(Hf[lab == k])) for k in range(n) if sizes[k]}
+        meds = {k: float(np.nanmedian(Hf[lab == k])) if np.isfinite(Hf[lab == k]).any() else np.nan for k in range(n) if sizes[k]}
         changed = False
         for k in sorted(range(n), key=lambda k: sizes[k]):
             if not sizes[k] or sizes[k] * cell2 >= MIN_PART_FT2: continue
             m = lab == k; ring = ndimage.binary_dilation(m) & ~m & (lab >= 0)
             nb = np.unique(lab[ring]); nb = nb[nb != k]
             if not len(nb): continue
-            tgt = min(nb, key=lambda t: abs(meds.get(t, 1e9) - meds[k]))
+            tgt = min(nb, key=lambda t: abs(meds.get(t, 1e9) - meds[k]) if np.isfinite(meds.get(t, np.nan)) and np.isfinite(meds[k]) else 1e9)
             lab[m] = tgt; changed = True
             sizes = np.bincount(lab[lab >= 0], minlength=n)
         if not changed: break
     ks = [k for k in np.unique(lab) if k >= 0]
     if len(ks) == 1:
-        return [pg], [float(np.median(Hf[ins]))]
+        return [pg], [float(np.nanmedian(Hf[ins]))]
     # one polygon per region from its cells, then a consistent simplification of the whole coverage
     c = G['cell']; cen, ux, vx = G['cen'], G['ux'], G['vx']
     def cellpoly(i, j):
@@ -116,7 +127,7 @@ def partition(pg, G, H):
     for k, g in zip(ks, simp):
         for p in polys(g.intersection(pg)):
             if p.area >= 20:
-                parts.append(p); meds.append(float(np.median(Hf[lab == k])))
+                parts.append(p); meds.append(float(np.nanmedian(Hf[lab == k])) if np.isfinite(Hf[lab == k]).any() else np.nan)
     # slivers lost to clipping: give any uncovered footprint area to the touching part with most shared edge
     rest = pg.difference(unary_union(parts))
     for r in polys(rest):
@@ -196,11 +207,17 @@ def clean_partition(parts, pg, spike=0.5, rounds=3):
         if p is None: continue
         ps = polys(p)
         if ps: out.append(max(ps, key=lambda q: q.area))
+    # remove sub-0.15 ft edges (cut points off the grid) from ALL parts together, so shared boundaries stay identical
+    try:
+        simp = shapely.coverage_simplify(np.array(out, dtype=object), tolerance=0.15, simplify_boundary=False)
+        if all(not g.is_empty for g in simp): out = [max(polys(g), key=lambda q: q.area) if polys(g) else o for g, o in zip(simp, out)]
+    except Exception:
+        pass
     return [shapely.set_precision(p, GRID) for p in out]
 
 
 def _pts_in(pp, T):
-    inn = shapely.contains_xy(pp.buffer(0.5), T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)
+    inn = shapely.contains_xy(pp, T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)     # exact: no neighbour heights
     s = inn & (T[:, 3] <= 1)
     return (T[s] if s.sum() >= RF.MIN_PTS else T[inn])[:, :3]
 
@@ -348,7 +365,14 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
     T, V = P[~test], P[test]
     area = pg.area
     cell = 1.5 if area < 6000 else (2.0 if area < 30000 else 3.0)
-    G, H = height_raster(pg, T, cell)
+    # adapt the raster to the data: coarsen until ~85% of footprint cells hold a return, so connectivity uses measured
+    # cells only without fragmenting sparse surveys (never coarser than 4.5 ft)
+    while True:
+        G, H = height_raster(pg, T, cell)
+        share = float(np.mean(~np.isnan(H[G['inside']]))) if G['inside'].any() else 1.0
+        if share >= 0.85 or cell >= 4.5: break
+        cell = min(4.5, cell * 1.25)
+    G['measured_share'] = share
     part_polys, meds = partition(pg, G, H)
     # parts that no single primitive explains are split further by the best straight cut (recursive)
     refined = []
@@ -356,7 +380,7 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
     part_polys = clean_partition(refined, pg)
     parts = []
     for k, pp in enumerate(part_polys):
-        inn = shapely.contains_xy(pp.buffer(0.5), T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)
+        inn = shapely.contains_xy(pp, T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)
         pts = T[inn][:, :3]
         sP = T[inn & (T[:, 3] <= 1)][:, :3] if len(T) else pts
         use_pts = sP if len(sP) >= RF.MIN_PTS else pts
@@ -436,29 +460,56 @@ def mesh_parts(parts, terr, cut_lines=()):
             vals = [a_ * rp.x + b_ * rp.y + c_ for a_, b_, c_ in P_]
             pi = int(np.argmin(vals))                     # min-of-planes: the lowest plane owns the cell
         cell_info.append((c, k, pi))
+    # sliver cells (near-coincident lines) join the neighbouring cell they share the longest boundary with, so their
+    # edges become internal (no wall) instead of producing near-duplicate walls
+    if cell_info:
+        ctree = shapely.STRtree([c for c, _, _ in cell_info])
+        for idx, (c, k, pi) in enumerate(cell_info):
+            if c.area >= 0.05: continue
+            best, bl = None, 0.0
+            for j in ctree.query(c.buffer(0.01)):
+                if j == idx or cell_info[j][0].area < 0.05: continue
+                l = c.boundary.intersection(cell_info[j][0].boundary)
+                l = l.length if l is not None else 0.0
+                if l > bl: best, bl = j, l
+            if best is not None:
+                cell_info[idx] = (c, cell_info[best][1], cell_info[best][2])
     # from here on the arrangement is the only geometry: each part is the union of its cells
     for k in range(len(parts)):
         cs = [c for c, kk, _ in cell_info if kk == k]
         if cs: parts[k]['poly'] = unary_union(cs)
     part_index = shapely.STRtree([p_['poly'] for p_ in parts])
-    # arrangement edges with the part on each side; walls where the two sides differ in height
-    segs = []
-    for ln in getattr(lines, 'geoms', [lines]):
-        co = list(ln.coords)
-        segs += list(zip(co[:-1], co[1:]))
+    # arrangement edges with the part on each side, from CELL ADJACENCY (exact; no probes that could jump a sliver).
+    # With every cell ring oriented counter-clockwise (holes clockwise), a cell's interior lies left of each directed
+    # edge, so its outward normal is the right-hand normal.
+    from shapely.geometry.polygon import orient
+    edge_cells = {}
+    for ci, (c, k, pi) in enumerate(cell_info):
+        oc = orient(c, 1.0)
+        for ring in [oc.exterior] + list(oc.interiors):
+            co = list(ring.coords)
+            for p0, p1 in zip(co[:-1], co[1:]):
+                if p0 == p1: continue
+                L_ = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+                out_n = ((p1[1] - p0[1]) / L_, -(p1[0] - p0[0]) / L_)
+                key = (p0, p1) if p0 < p1 else (p1, p0)
+                edge_cells.setdefault(key, []).append((k, out_n))
     cuts = unary_union([g.buffer(0.4) for g in cut_lines]) if cut_lines else None
-    EPS_SIDE, EPS = 0.02, 0.015
+    EPS = 0.015
     quads, crossings, base = [], {}, []
-    for a, b in segs:
+    for (a, b), sides in edge_cells.items():
         L = math.hypot(b[0] - a[0], b[1] - a[1])
         if L < 1e-6: continue
-        nx, nz = (b[1] - a[1]) / L, -(b[0] - a[0]) / L
-        mx, mz = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
-        kp, km = owner(mx + nx * EPS_SIDE, mz + nz * EPS_SIDE), owner(mx - nx * EPS_SIDE, mz - nz * EPS_SIDE)
-        if kp == km: continue                                     # inside one part (a ridge or hip line): no wall
+        ks = {k for k, _ in sides}
+        if len(sides) >= 2 and len(ks) == 1: continue           # inside one part (ridge, hip, or a merged sliver)
         is_cut = cuts is not None and cuts.contains(LineString([a, b]))
-        for k, j, onx, onz in ((km, kp, nx, nz), (kp, km, -nx, -nz)):
-            if k is None: continue                                # the wall is drawn from the higher side only
+        pairs = []
+        if len(sides) == 1:
+            pairs.append((sides[0][0], None, sides[0][1]))
+        else:
+            (k1, n1), (k2, n2) = sides[0], sides[1]
+            pairs += [(k1, k2, n1), (k2, k1, n2)]
+        for k, j, (onx, onz) in pairs:
             top0, top1 = hfun(k, *a), hfun(k, *b)
             if j is None: bot0, bot1 = round(float(terr(*a)) - 1.5, 2), round(float(terr(*b)) - 1.5, 2)
             else: bot0, bot1 = hfun(j, *a), hfun(j, *b)
@@ -467,10 +518,8 @@ def mesh_parts(parts, terr, cut_lines=()):
             if min(d0, d1) >= -EPS: spans = [(0.0, 1.0)]
             else:
                 t = d0 / (d0 - d1)
-                if t * L < 0.1:                        # crossing at an endpoint: snap to it (no sliver vertex)
-                    spans = [(0.0, 1.0)] if d1 > 0 else []
-                elif (1 - t) * L < 0.1:
-                    spans = [(0.0, 1.0)] if d0 > 0 else []
+                if t * L < 0.1: spans = [(0.0, 1.0)] if d1 > 0 else []
+                elif (1 - t) * L < 0.1: spans = [(0.0, 1.0)] if d0 > 0 else []
                 else:
                     spans = [(0.0, t)] if d0 > 0 else [(t, 1.0)]
                     crossings.setdefault((a, b), []).append(t)
@@ -482,7 +531,7 @@ def mesh_parts(parts, terr, cut_lines=()):
                 else: y0b, y1b = hfun(j, *q0), hfun(j, *q1)
                 if t0 > 0 or y0t - y0b <= EPS: y0b = y0t
                 if t1 < 1 or y1t - y1b <= EPS: y1b = y1t
-                if y0t < y0b: y0b = y0t                  # snapped crossing at an end: that end has zero height
+                if y0t < y0b: y0b = y0t
                 if y1t < y1b: y1b = y1t
                 ex, ez = q1[0] - q0[0], q1[1] - q0[1]
                 s0 = 0.0; s1 = math.hypot(ex, ez)
