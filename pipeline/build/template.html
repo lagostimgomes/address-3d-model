@@ -360,6 +360,7 @@ function finishOpenings(){
     gl.receiveShadow=true;fr.castShadow=false;scene.add(gl,fr);glows.push({material:glass})}
   const dn=DOORS.length;if(dn){const leaf=new THREE.MeshStandardMaterial({color:0x22282d,roughness:.25,metalness:.3,emissive:0xffd8a0,emissiveIntensity:0});
     for(const [x,y,z,ry,w,kind,d6] of DOORS){const g=new THREE.Group();g.position.set(x,y,z);g.rotation.y=ry;scene.add(g);
+      if(kind==='inferred-driveway'){mesh(new THREE.PlaneGeometry(w,7),garageMat('#e9e6df'),0,3.9,.08,g,false);box(w+.9,.5,.5,MAT.trim,0,7.65,.15,g,false);continue}
       const h=w>5?8.5:7.2;mesh(new THREE.PlaneGeometry(w,h),leaf,0,h/2+.4,.08,g,false);
       box(w+.9,.5,.5,MAT.trim,0,h+.65,.15,g,false);for(const sx of[-1,1])box(.4,h+.4,.4,MAT.trim,sx*(w/2+.25),h/2+.4,.12,g,false);
       if(w>5)box(.12,h,.2,MAT.trim,0,h/2+.4,.12,g,false);
@@ -393,7 +394,7 @@ function show(id){const H=S.houses.find(h=>h.id===id);const F=H.role==='featured
   document.getElementById('stats').innerHTML=(H.parts?[['Height',`${Math.round(H.ridge_h)} ft`],['Footprint',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Parts',H.parts.length],['Storeys',H.stories]]:G?[['Height',`${Math.round(H.ridge_h)} ft`],['Eaves',`${Math.round(H.wall_h)} ft`],['Roof area',`${(Math.round(H.area_ft2/100)*100).toLocaleString()} ft²`],['Pitch',H.roof.pitch_deg?`${Math.round(H.roof.pitch_deg)}°`:'flat']]
     :[['Ridge',`${Math.round(H.ridge_h)} ft`],['Footprint',`${Math.round(H.w)}×${Math.round(H.d)}`],['Roof',`${ROOFN[H.roof.type]} ${Math.round(H.roof.pitch_deg)}°`],['Stories',H.stories]]).map(([k,v])=>`<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
   const cg=(H.roof.cross||[]).length;
-  const pv=H.provenance||{},DK={mapped:'mapped entrance','inferred-path':'inferred: a mapped path ends at the wall','inferred-street':'inferred: faces the street'};
+  const pv=H.provenance||{},DK={mapped:'mapped entrance','inferred-driveway':'garage door inferred: estimated paving meets the wall','inferred-path':'inferred: a mapped path ends at the wall','inferred-street':'inferred: faces the street'};
   const PK={flat:'flat',shed:'shed',gable:'gable',hip:'hip',hipped:'hipped',dome:'dome','planar-brep':'piecewise-planar',envelope:'envelope (shown flat)'};
   if(H.parts){const env=H.parts.filter(p=>p.kind==='envelope').length;
     document.getElementById('look').textContent=`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; built from ${H.parts.length} parts fitted to LiDAR: ${[...new Set(H.parts.map(p=>PK[p.kind]||p.kind))].join(', ')}.${env?` ${env} part(s) are envelopes: none of the roof shapes the method knows fit the LiDAR there, so they are shown flat (a limit of the method, not proof the roof is flat).`:''} Tallest point ${Math.round(H.ridge_h)} ft above grade.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+' (plain doors; no porch or canopy without evidence).':''} Windows are generated.`}

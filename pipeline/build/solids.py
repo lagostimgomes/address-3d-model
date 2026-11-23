@@ -389,8 +389,7 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         refined = []
         for pp in part_polys: refined += refine_part(pp, T, pg=pg)
         part_polys = clean_partition(refined, pg)
-    parts = []
-    for k, pp in enumerate(part_polys):
+    def make_part(pp):
         inn = shapely.contains_xy(pp, T[:, 0], T[:, 2]) if len(T) else np.zeros(0, bool)
         pts = T[inn][:, :3]
         sP = T[inn & (T[:, 3] <= 1)][:, :3] if len(T) else pts
@@ -402,12 +401,34 @@ def build(pg, P, terr, seed=0, cut_lines=(), ways=(), nodes=(), roads_xy=None, u
         # held-out residual on this part (points withheld before partition and fitting)
         vin = shapely.contains_xy(pp, V[:, 0], V[:, 2]) if len(V) else np.zeros(0, bool)
         vr = np.abs(fit.h(V[vin, 0], V[vin, 2]) - V[vin, 1]) if vin.any() else np.array([])
-        cov = float(np.mean(~np.isnan(H[shapely.contains_xy(pp, G['GX'], G['GZ'])]))) if shapely.contains_xy(pp, G['GX'], G['GZ']).any() else None
+        msk = shapely.contains_xy(pp, G['GX'], G['GZ'])
+        cov = float(np.mean(~np.isnan(H[msk]))) if msk.any() else None
         st.update(heldout=dict(n=int(len(vr)), median_abs=round(float(np.median(vr)), 2) if len(vr) else None,
                                p90_abs=round(float(np.percentile(vr, 90)), 2) if len(vr) else None, units='ft',
                                underpowered=bool(len(vr) < 50)),
                   coverage=None if cov is None else round(cov, 3), density=round(len(pts) / max(pp.area, 1), 3), area_ft2=round(pp.area))
-        parts.append(dict(poly=pp, fit=fit, stats=st))
+        med = float(np.median(use_pts[:, 1])) if len(use_pts) else np.nan
+        return dict(poly=pp, fit=fit, stats=st, med=med)
+    parts = [make_part(pp) for pp in part_polys]
+    # a small part no shape explains joins the adjacent part of the most similar height when the joined part then
+    # passes the gate (typically a corner under tree canopy); otherwise it stays an envelope
+    changed = True
+    while changed:
+        changed = False
+        for i, prt in enumerate(parts):
+            if prt['stats']['kind'] != 'envelope' or prt['poly'].area >= 2 * MIN_PART_FT2: continue
+            nb = [(j, q) for j, q in enumerate(parts) if j != i and prt['poly'].intersection(q['poly'].buffer(0.05)).length > 0
+                  and prt['poly'].buffer(0.05).intersection(q['poly']).area > 0.5]
+            nb = [(j, q) for j, q in nb if not (np.isnan(prt['med']) or np.isnan(q['med'])) and abs(prt['med'] - q['med']) <= STEP_FT]
+            for j, q in sorted(nb, key=lambda t: abs(prt['med'] - t[1]['med'])):
+                u = unary_union([prt['poly'], q['poly']]).buffer(0)
+                if u.geom_type != 'Polygon': continue
+                m = make_part(u)
+                if m['stats']['kind'] in ('envelope', 'insufficient'): continue
+                m['stats']['merged_from'] = 'a small unexplained part joined to its neighbour of similar height'
+                parts = [x for t, x in enumerate(parts) if t not in (i, j)] + [m]
+                changed = True; break
+            if changed: break
     # S2.3: an envelope part gets one more chance as a support-constrained planar B-rep; accepted only if every plane
     # region passes the residual gate and the penalised score beats the envelope's
     expanded = []

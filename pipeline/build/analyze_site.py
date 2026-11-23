@@ -485,6 +485,7 @@ def pavement(prim, G):
     dark = ndimage.median_filter(dark.astype(np.uint8), size=3).astype(bool)
     dark = morphology.remove_small_objects(dark, max_size=40)
     dark = morphology.remove_small_holes(dark, max_size=30)
+    pavement.mask = dark
     return dict(G.meta(), rle=rle(dark), share=round(float(dark.mean()), 3))
 
 
@@ -751,6 +752,22 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                 if best is None or d < best[0]: best = (d, w['name'])
         street_name = best[1] if best else None
     nodes = F.get('entrances', [])
+    # ---- paving: mapped ground wins; otherwise a LiDAR-intensity estimate, which also stands in for the street
+    # direction (its largest component) and gives driveway evidence for garage doors (other components)
+    has_map_ground = bool(F.get('ways') or F.get('surfaces'))
+    pave = None if has_map_ground else pavement(prim, G)
+    drive_xy = None
+    if pave is not None:
+        from scipy import ndimage as _nd
+        M_ = pavement.mask.copy()
+        lab_, n_ = _nd.label(M_)
+        if n_:
+            sizes_ = _nd.sum(M_, lab_, range(1, n_ + 1)); big_ = int(np.argmax(sizes_)) + 1
+            ii, jj = np.nonzero(M_); px_, pz_ = G.xz(ii, jj)
+            drive_xy = np.c_[px_, pz_]
+            if roads_xy is None:
+                bi, bj = np.nonzero(lab_ == big_); bx_, bz_ = G.xz(bi, bj)
+                roads_xy = np.c_[bx_, bz_][::4]
     # ---- build every included building
     blds, edge_touch, cut_ids = [], [], []
     xs_all, zs_all = X[nonb], Z[nonb]
@@ -774,7 +791,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         inn = shapely.contains_xy(pg.buffer(1.5 if b['outline'] == 'mapped' else 3.0), X[Ii], Z[Ii]); Ii = Ii[inn]
         Pp = np.c_[X[Ii], Y[Ii], Z[Ii], NR[Ii]]
         # one route for every building (user, 2026-11-23): explicit solids, so every model is gated the same way
-        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO)
+        hh = mesh_building(pg, Pp, terr, b, tags, cut_lines, F.get('ways', []), nodes, roads_xy, G, GEO, drive_xy)
         hh.update(id=bid, role='featured' if is_feat else 'context', clipped=bid in cut_ids or bid in edge_touch,
                   provenance=dict(hh.get('provenance') or {}, outline=b['outline'] if b['rec'] or b['outline'] == 'measured' else 'measured',
                                   outline_source=(b['rec'] or {}).get('source_id'), lidar_support=round(b['support'], 2)))
@@ -805,8 +822,6 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
             if any((xx - t['x']) ** 2 + (zz - t['z']) ** 2 < 14 ** 2 for t in trees): continue
             trees.append(dict(x=round(float(xx), 1), z=round(float(zz), 1), h=round(float(min(hh_, 120)), 1)))
             if len(trees) >= 600: break
-    has_map_ground = bool(F.get('ways') or F.get('surfaces'))
-    pave = None if has_map_ground else pavement(prim, G)
     fp = feat['poly']
     outline = [[round(x_, 1), round(z_, 1)] for x_, z_ in fp.exterior.coords[:-1]]
     fh_ = next((h for h in blds if h['id'] == 'featured'), None)
@@ -834,7 +849,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                  datasets=[dict(name=d['name'], year=d['year'], points=int(d['n']), z_offset_ft=round(d['offset_ft'], 2),
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
-                             source='mapped' if roads_xy is not None else ('lidar-intensity' if pave else 'none')),
+                             source='mapped' if rx else ('lidar-intensity' if pave else 'none')),
                  site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=pave,
                  featured_basis=feat_basis, candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
     # withheld roof points go to a sidecar for gates.py, never into the page
@@ -914,7 +929,7 @@ def absorb_fragments(L, min_cells):
     return L
 
 
-def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO):
+def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GEO, drive_xy=None):
     """Any building that is not a simple house: explicit parts with fitted roof primitives (solids.py), one
     consistent exterior, openings on exposed walls, plain doors labelled with their evidence (C1-C3)."""
     import solids as SO
@@ -923,8 +938,8 @@ def mesh_building(pg, Pp, terr, b, tags, cut_lines, ways, nodes, roads_xy, G, GE
     R = SO.build(pg, Pp, terr, seed=seed, cut_lines=cut_lines)
     grade = float(np.median(terr(*np.array(pg.exterior.coords).T)))
     big = pg.area > 1800
-    doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big)
     use = tags.get('building') or ('house' if pg.area < 2500 else 'yes')
+    doors = GEO.entrances(pg, ways, nodes, roads_xy, terr, big, drive_xy=drive_xy, garage_ok=pg.area < 4000)
     wins, fh, base = SO.openings(pg, R, terr, doors, use)
     # summary heights from the reconstructed parts (area-weighted)
     tops, eaves_, areas = [], [], []

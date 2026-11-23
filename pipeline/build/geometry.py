@@ -255,7 +255,7 @@ def roof_y(pl, x, z, nx=0.0, nz=0.0):
 
 
 # ---------------------------------------------------------------- entrances
-def entrances(poly, ways, nodes, roads_xy, terr, big):
+def entrances(poly, ways, nodes, roads_xy, terr, big, drive_xy=None, garage_ok=False):
     """Doors on this building: mapped entrance nodes, then footpaths that end at the wall, else (for larger
     buildings) the middle of the longest wall facing the nearest street. Returns [x, y, z, ry, width, kind]."""
     ext = poly.exterior
@@ -280,7 +280,8 @@ def entrances(poly, ways, nodes, roads_xy, terr, big):
             if ext.distance(Point(px, pz)) < 6:
                 q = pts[1] if k == 0 else pts[-2]
                 if not poly.contains(Point(q)): add(px, pz, 'inferred-path')
-    if not found and big and roads_xy is not None and len(roads_xy):
+    # every building gets one street door when nothing better is known (C3: a plain inferred door is allowed)
+    if not any(f[5] != 'inferred-driveway' for f in found) and roads_xy is not None and len(roads_xy):
         segs = list(zip(ext.coords[:-1], ext.coords[1:]))
         best = None
         for (x0, z0), (x1, z1) in segs:
@@ -295,6 +296,37 @@ def entrances(poly, ways, nodes, roads_xy, terr, big):
             score = face * min(L, 60) / (1 + d[k] / 200)
             if best is None or score > best[0]: best = (score, mx, mz)
         if best and best[0] > 0: add(best[1], best[2], 'inferred-street')
+    # garage doors: where estimated paving (a driveway) meets a wall of a house-sized building along >= 9 ft.
+    # Evidence: paved cells within 5 ft outside the wall; the door is centred on the paved stretch.
+    if garage_ok and drive_xy is not None and len(drive_xy):
+        from shapely.geometry import MultiPoint
+        simp = poly.simplify(1.0, preserve_topology=True)
+        co = list(simp.exterior.coords)
+        near = drive_xy[np.hypot(drive_xy[:, 0] - poly.centroid.x, drive_xy[:, 1] - poly.centroid.y) < math.sqrt(poly.area) * 2 + 20]
+        for (x0, z0), (x1, z1) in zip(co[:-1], co[1:]):
+            L = math.hypot(x1 - x0, z1 - z0)
+            if L < 10 or not len(near): continue
+            tx, tz = (x1 - x0) / L, (z1 - z0) / L; nx, nz = tz, -tx
+            mx, mz = (x0 + x1) / 2, (z0 + z1) / 2
+            if poly.contains(Point(mx + nx * 0.5, mz + nz * 0.5)): nx, nz = -nx, -nz
+            rel = near - [x0, z0]
+            s_ = rel @ [tx, tz]; o_ = rel @ [nx, nz]
+            m = (s_ > 1.5) & (s_ < L - 1.5) & (o_ > 0.5) & (o_ < 5.0)
+            if m.sum() < 6: continue
+            ss = np.sort(s_[m]); gaps = np.diff(ss)
+            # the longest run of paved cells with no gap over 3 ft
+            runs, st_ = [], 0
+            for k in range(len(gaps)):
+                if gaps[k] > 3.0: runs.append((ss[st_], ss[k])); st_ = k + 1
+            runs.append((ss[st_], ss[-1]))
+            a_, b_ = max(runs, key=lambda r: r[1] - r[0])
+            if b_ - a_ < 9.0: continue
+            w_ = 16.0 if b_ - a_ >= 18 else 8.6
+            c_ = (a_ + b_) / 2
+            px, pz = x0 + tx * c_, z0 + tz * c_
+            if any(math.hypot(px - f[0], pz - f[2]) < 10 for f in found): continue
+            found.append([round(px, 2), round(float(terr(px + nx * 2, pz + nz * 2)), 2), round(pz, 2),
+                          round(math.atan2(nx, nz), 4), w_, 'inferred-driveway'])
     return found
 
 
