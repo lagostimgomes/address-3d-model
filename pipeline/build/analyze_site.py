@@ -891,6 +891,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         for h_ in blds:
             if h_['id'] in LK.get('buildings', {}):
                 h_['look'] = dict(LK['buildings'][h_['id']], status=LK.get('status', 'observed'), source=LK.get('source'), method=LK.get('method'))
+    site_shapes = json.load(open(os.path.join(obs_dir, 'site_shapes.json'))) if os.path.exists(os.path.join(obs_dir, 'site_shapes.json')) else None
     if os.path.exists(os.path.join(obs_dir, 'ground.json')):
         ground_obs = json.load(open(os.path.join(obs_dir, 'ground.json')))
         ground_obs['note'] = 'classes from the aerial; buildings masked by their footprints'
@@ -901,7 +902,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
                              source='mapped' if rx else ('lidar-intensity' if pave else 'none')),
-                 site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=None if ground_obs else pave, ground_cover=ground_obs,
+                 site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=None if (ground_obs or site_shapes) else pave, ground_cover=ground_obs, site_shapes=site_shapes,
                  featured_basis=feat_basis, candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
     # withheld roof points go to a sidecar for gates.py, never into the page
     ho = {hh['id']: hh.pop('_heldout') for hh in blds if '_heldout' in hh}
