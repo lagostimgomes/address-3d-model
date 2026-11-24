@@ -883,6 +883,17 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         want = unary_union([zone] + [b['poly'] for b in inc if b['poly'].area <= whole_max_ft2 or b is feat]).buffer(30).bounds
         coverage['wanted_bounds_ft'] = [round(want[0], 1), round(want[2], 1), round(want[1], 1), round(want[3], 1)]
     front = front_of(fp)
+    # ---- observations from imagery (optional; produced by pipeline/derive/*): facades per building, ground cover
+    obs_dir = os.path.join(folder, 'observations')
+    ground_obs = None
+    if os.path.exists(os.path.join(obs_dir, 'looks.json')):
+        LK = json.load(open(os.path.join(obs_dir, 'looks.json')))
+        for h_ in blds:
+            if h_['id'] in LK.get('buildings', {}):
+                h_['look'] = dict(LK['buildings'][h_['id']], status=LK.get('status', 'observed'), source=LK.get('source'), method=LK.get('method'))
+    if os.path.exists(os.path.join(obs_dir, 'ground.json')):
+        ground_obs = json.load(open(os.path.join(obs_dir, 'ground.json')))
+        ground_obs['note'] = 'classes from the aerial; buildings masked by their footprints'
     scene = dict(schema_version=3, address=site['address'], matched_address=site.get('matched_address'),
                  lat=site['lat'], lon=site['lon'], pad_ft=round(terr.pad, 2), buffer_ft=buffer_ft,
                  dem_bounds_ft=bounds, coverage=coverage, maps=maps,
@@ -890,7 +901,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
                                 fit_spread_ft=round(d['spread_ft'], 2)) for d in D],
                  street=dict(front=[round(float(front[0]), 4), round(float(front[1]), 4)], name=street_name,
                              source='mapped' if rx else ('lidar-intensity' if pave else 'none')),
-                 site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=pave,
+                 site=dict(G.meta(), rle=rle(site_m)), outline=outline, houses=blds, trees=trees, pavement=None if ground_obs else pave, ground_cover=ground_obs,
                  featured_basis=feat_basis, candidates=len(blds_src), footprints=dict(mapped=len(mapped), measured=sum(1 for b in blds_src if b['outline'] == 'measured')))
     # withheld roof points go to a sidecar for gates.py, never into the page
     ho = {hh['id']: hh.pop('_heldout') for hh in blds if '_heldout' in hh}

@@ -195,7 +195,7 @@ def build(folder, out=None):
     years = sorted({d['year'] for d in scene['datasets'] if d['year']}, reverse=True)
     data = dict(title=title, sub=sub, lat=site['lat'], lon=site['lon'], pad=pad, rows=dem['rows'], cols=dem.get('cols', dem['rows']),
                 cell=dem['cell_size_ft'], bounds=scene.get('dem_bounds_ft') or dem_bounds(dem), coverage=scene.get('coverage'), maps=scene.get('maps'), featured_basis=scene.get('featured_basis'),
-                houses=houses, trees=scene['trees'], ground=ground, front=scene['street']['front'], pavement=scene.get('pavement'),
+                houses=houses, trees=scene['trees'], ground=ground, front=scene['street']['front'], pavement=scene.get('pavement'), ground_cover=scene.get('ground_cover'),
                 site=scene['site'], outline=scene.get('outline'), buffer_ft=scene.get('buffer_ft', 100),
                 site_name=enr['site_name'], fact_sources=enr['sources'], feat_name=feat.get('name'),
                 street_source=scene['street']['source'], street=street_name,

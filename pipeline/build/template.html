@@ -210,6 +210,9 @@ const GROUND=(()=>{const c=document.createElement('canvas');c.width=GW;c.height=
   for(const w of ws){if(FOOT.has(w.k))continue;path(w);g.strokeStyle='#505357';g.lineWidth=w.w*GPX;g.stroke()}
   for(const w of ws){if(['secondary','primary','tertiary','trunk'].includes(w.k)){path(w);g.strokeStyle='rgba(230,190,60,.85)';g.lineWidth=Math.max(1,.35*GPX);g.setLineDash([]);g.stroke()}
     else if(w.k==='residential'&&w.w>=24){path(w);g.strokeStyle='rgba(255,255,255,.35)';g.lineWidth=Math.max(1,.3*GPX);g.setLineDash([10*GPX,20*GPX]);g.stroke();g.setLineDash([])}}
+  const GC=S.ground_cover;if(GC){const px=GC.cell*GPX,COL={lawn:'#6f9a4a',asphalt:'#46494c',concrete:'#d3cfc6',bed:'#6b4a35'};
+    for(const k of['lawn','asphalt','concrete','bed']){const rows=GC.classes[k];if(!rows)continue;g.fillStyle=COL[k];
+      rows.forEach((runs,i)=>{for(let q=0;q<runs.length;q+=2)g.fillRect((GC.origin[0]-B[0])*GPX+runs[q]*px,(GC.origin[1]-B[2])*GPX+i*px,runs[q+1]*px+.6,px+.6)})}}
   const P=S.pavement;if(P){const px=P.cell*GPX;g.fillStyle='#5a5d60';P.rle.forEach((runs,i)=>{for(let k=0;k<runs.length;k+=2)g.fillRect((P.bounds[0]-B[0])*GPX+runs[k]*px,(P.bounds[2]-B[2])*GPX+i*px,runs[k+1]*px+.5,px+.5)})}
   const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;t.anisotropy=8;return t})();
 let BASE=0;
@@ -302,8 +305,10 @@ function label(text,featured){const c=document.createElement('canvas');c.width=2
   const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,depthTest:false}));s.scale.set(22,8.6,1);s.renderOrder=9;return s}
 function buildHouse(H){
   const g=new THREE.Group();g.position.set(H.x,H.grade,H.z);g.rotation.y=H.rot;g.userData.id=H.id;scene.add(g);g.updateMatrixWorld();GROUPS[H.id]=g;
-  const w=H.w,d=H.d,wh=H.wall_h,R=H.roof,SD=mk(sidingDraw(H.siding),4.67,256),st=Math.max(1,H.stories||1),fh=wh/st;
-  wall(g,w,wh,d,0,wh/2,0,SD,SD);roofBand(g,w,d,wh+.2);corners(g,w,d,wh);
+  const L=H.look||{},w=H.w,d=H.d,wh=H.wall_h,R=H.roof,st=Math.max(1,H.stories||1),fh=wh/st;
+  const SD=mk(sidingDraw((L.sides&&L.sides.color)||H.siding),4.67,256),FR=(L.front&&L.front.material==='brick')?MAT.brick:(L.front?mk(sidingDraw(L.front.color),4.67,256):SD);
+  const SH=L.shutters?solid(parseInt(L.shutters.slice(1),16)):null;
+  wall(g,w,wh,d,0,wh/2,0,FR,SD);roofBand(g,w,d,wh+.2);corners(g,w,d,wh);
   if(R.type==='hip')hipRoof(g,w,d,R.h,wh+.6);
   else if(R.ridge_axis==='z')gable(g,'z',w,d,R.h,wh+.6,0,0,SD);else gable(g,'x',d,w,R.h,wh+.6,0,0,SD);
   for(const c of(R.cross||[])){const len=Math.max(6,c.to-c.from),cz=(c.to+c.from)/2;
@@ -311,15 +316,32 @@ function buildHouse(H){
       if(c.to>d/2+1.5){const bd=c.to-d/2;wall(g,c.span-.8,wh,bd,pos,wh/2,d/2+bd/2,SD,SD);roofBand(g,c.span-.8,bd,wh+.2,pos,d/2+bd/2)}
       gable(g,'z',c.span,len,c.h,wh+.6,pos,cz,SD,[1]);if(c.h>7)oculus(g,pos,wh+.6+c.h*.42,Math.max(d/2,c.to)+.15,Math.min(1.2,c.span/14))}
     else gable(g,'x',c.span,len,c.h,wh+.6,cz,c.pos,SD,[1])}
-  const gs=H.garage_side,nG=w>=40?2:(w>=28?1:0),gw=8.6,gzone=nG*(gw+1.2)+1,gx=gs*(w/2-gzone/2-1.2),dz=d/2;
-  if(nG){for(let k=0;k<nG;k++)garageDoor(g,gx+(k-(nG-1)/2)*(gw+1.2),dz,gw,H.garage);}
-  const dx=nG?-gs*Math.min(w*.14,w/2-6):-w*.12;frontDoor(g,dx,dz+.02,H.door,{transom:st>1});box(5.6,.6,3.4,MAT.conc,dx,.3,dz+1.7,g);
+  const LG=L.garage||{},gs=LG.side!=null?LG.side:H.garage_side,nG=LG.count!=null?LG.count:(w>=40?2:(w>=28?1:0)),gw=LG.wide?16:8.6,gzone=nG*(gw+1.2)+1,gx=gs*(w/2-gzone/2-1.2),dz=d/2;
+  if(nG){for(let k=0;k<nG;k++)garageDoor(g,gx+(k-(nG-1)/2)*(gw+1.2),dz,gw,LG.color||H.garage);}
+  // observed front gable (Street View): a shallow front-facing gable over the bay, with its vent and arched window
+  const FG=L.front_gable,fgx=FG?(FG.pos==='left'?-gs*(w/2-FG.span_ft/2-.5):FG.pos==='right'?gs*(w/2-FG.span_ft/2-.5):(nG?-gs*w*.12:0)):null;
+  if(FG&&!(R.cross||[]).some(c=>Math.abs(c.pos-fgx)<FG.span_ft/2)){const sp=FG.span_ft;gable(g,'z',sp,3,sp*.42,wh+.6,fgx,dz-1.2,FR,[1]);
+    if(FG.vent)oculus(g,fgx,wh+.6+sp*.42*.45,dz+.35,.9)}
+  const LD=L.door||{},dx=FG&&FG.pos!=='center'&&L.entry!=='covered-porch'?fgx:(nG?-gs*Math.min(w*.14,w/2-6):-w*.12);
+  frontDoor(g,dx,dz+.02,LD.color||H.door,{transom:LD.transom!=null?LD.transom:st>1,pediment:L.entry==='portico'});
+  if(L.entry==='portico'){for(const s of[-1,1]){const c=mesh(new THREE.CylinderGeometry(.35,.4,9.4,10),MAT.trim,dx+s*2.8,4.7+.6,dz+4.2,g)}box(7.4,.5,5,MAT.trim,dx,10.2,dz+2.4,g);box(7,.6,5,MAT.conc,dx,.3,dz+2.5,g)}
+  else if(L.entry==='covered-porch'){const pw=Math.min(w*.5,22),px=dx+(-gs)*(pw/2-4);box(pw,.6,7,MAT.conc,px,.3,dz+3.5,g);box(pw+.6,.4,7.4,MAT.trim,px,9.6,dz+3.6,g);
+    for(let k=0;k<=Math.max(2,Math.round(pw/7));k++){const x=px-pw/2+.4+k*(pw-.8)/Math.max(2,Math.round(pw/7));mesh(new THREE.CylinderGeometry(.3,.3,9,8),MAT.trim,x,5.1,dz+6.8,g)}
+    box(pw-2,.25,.2,MAT.trim,px,3.2,dz+6.9,g);box(pw-2,.2,.2,MAT.trim,px,1.0,dz+6.9,g)}
+  else box(5.6,.6,3.4,MAT.conc,dx,.3,dz+1.7,g);
   for(let f=0;f<st;f++){const y=f*fh+fh*.55,n=Math.max(1,Math.floor((w-6)/8));for(let k=0;k<n;k++){const x=-w/2+3+(k+.5)*(w-6)/n;
-    if(f===0&&(Math.abs(x-dx)<4.2||(nG&&Math.abs(x-gx)<gzone/2+1.6)))continue;win(g,x,y,dz,{})}}
+    if(f===0&&(Math.abs(x-dx)<4.2||(nG&&Math.abs(x-gx)<gzone/2+1.6)))continue;
+    if(FG&&Math.abs(x-fgx)<FG.span_ft/2-1){if(f===st-1&&FG.arched_window&&!win._fg){win(g,fgx,y,dz,{arched:true,shutter:null})}continue}
+    win(g,x,y,dz,{shutter:SH})}}
+  if(FG&&FG.arched_window&&st===1)win(g,fgx,fh*.55,dz,{arched:true});
   for(const sx of[-1,1])for(let f=0;f<st;f++){const n=Math.max(1,Math.floor(d/14));for(let k=0;k<n;k++){const z=-d/2+(k+.5)*d/n;if(f===0&&nG&&sx===gs&&z>d/2-24)continue;win(g,sx*(w/2),f*fh+fh*.55,z,{ry:sx*Math.PI/2})}}
   for(let f=0;f<st;f++){const n=Math.max(1,Math.floor((w-6)/10));for(let k=0;k<n;k++)win(g,-w/2+3+(k+.5)*(w-6)/n,f*fh+fh*.55,-d/2,{ry:Math.PI})}
   const back=basement(g,w,d,SD);if(back<-5)deck(g,0,-d/2-6,Math.min(18,w*.45),12);
-  for(const x of[dx-4.5,dx+4.5])shrub(g,x,dz+2.2,1.5);
+  const PL=L.plantings||[];
+  if(PL.includes('evergreen-right-of-door'))shrub(g,dx+gs*3.6,dz+1.8,1.3,true);
+  for(const x of[dx-4.5,dx+4.5])if(!(PL.includes('evergreen-right-of-door')&&Math.sign(x-dx)===gs))shrub(g,x,dz+2.2,1.5);
+  if(PL.includes('bed-left')||PL.includes('bed-front')){const bx=PL.includes('bed-left')?-gs*(w/2-5):dx;box(9,.35,5,MAT.mulch,bx,.18,dz+5,g);for(const o of[-2.5,0,2.5])box(1.1,.8,1,MAT.stone,bx+o,.5,dz+5+(o?1:-1),g)}
+  if(L.lamp_post){const lp=new THREE.Group();lp.position.set(dx-gs*2,0,dz+15);g.add(lp);mesh(new THREE.CylinderGeometry(.12,.15,6,8),MAT.black,0,3,0,lp);mesh(new THREE.BoxGeometry(.7,.9,.7),solid(0x2b2b2b),0,6.4,0,lp)}
   if(H.role==='featured'){const l=label(H.label,true);l.position.set(0,(H.ridge_h||wh+10)+10,0);g.add(l)}
   g.traverse(o=>{if(o.isMesh)pick.push(o)})}
 /* ---------- mapped or measured footprints: meshes made in Python (roof clipped to the outline) ---------- */
@@ -401,7 +423,7 @@ function show(id){const H=S.houses.find(h=>h.id===id);const F=H.role==='featured
   if(H.parts){const env=H.parts.filter(p=>p.kind==='envelope').length;
     document.getElementById('look').textContent=`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; built from ${H.parts.length} parts fitted to LiDAR: ${[...new Set(H.parts.map(p=>PK[p.kind]||p.kind))].join(', ')}.${env?` ${env} part(s) are envelopes: none of the roof shapes the method knows fit the LiDAR there, so they are shown flat (a limit of the method, not proof the roof is flat).`:''} Tallest point ${Math.round(H.ridge_h)} ft above grade.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''}${(H.building_type||{}).type==='house'&&(H.template||{}).status==='chosen'?` Type: detached house (${H.building_type.status==='mapped'?'from the map tag':'inferred from size and height'}); the house template (a regular main block) fitted the LiDAR better than free-form parts, so it was used. Shown as defaults typical for a house, not observed: ${['siding'].concat((H.defaults||[]).map(d=>d.feature)).filter((v,i,a)=>a.indexOf(v)===i).join(', ')}.`:''} Windows are generated.`}
   else document.getElementById('look').textContent=G?`${pv.outline==='mapped'?'Outline mapped (OpenStreetMap)':'Outline measured from LiDAR'}; roof ${pv.heights==='measured'?`from ${H.roof.planes} measured planes`:pv.heights==='mapped'?'height from map tags (no LiDAR return)':'height unknown (generic)'}${H.clipped?'; cut at the '+(((S.coverage||{}).edge_touching||[]).includes(H.id)?'edge of the downloaded data':'site edge'):''}. Tallest point ${Math.round(H.ridge_h)} ft above grade; eaves around ${Math.round(H.wall_h)} ft.${(H.doors||[]).length?' Doors: '+[...new Set(H.doors.map(d=>DK[d[5]]))].join('; ')+'.':''} Windows are generated.`
-    :`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.`;
+    :`${ROOFN[H.roof.type]} roof at ${Math.round(H.roof.pitch_deg)}° (${(Math.tan(H.roof.pitch_deg*Math.PI/180)*12).toFixed(1)}/12)${cg?`, ${cg} cross gable${cg>1?'s':''}`:''}; eaves ${Math.round(H.eave_h||H.wall_h)} ft above the front grade.${H.look?` Facade observed in Street View (2022): ${H.look.front.material} front${H.look.shutters?', shutters':''}, ${H.look.garage?H.look.garage.count+' garage door'+(H.look.garage.count>1?'s':''):'no garage'}, ${({portico:'columned portico','covered-porch':'covered porch',stoop:'front stoop'})[H.look.entry]||'entry'}${H.look.front_gable?', front gable':''}. Roof shape and size: LiDAR.`:' Facade details are typical defaults, not observed.'}`;
   document.getElementById('site').textContent=`Shown: everything within ${S.buffer_ft} ft of the building — ${S.houses.length-1} other building${S.houses.length===2?'':'s'} and ${S.trees.length} trees.`}
 show(FEAT.id);
 const F=S.front,FX=FEAT.x,FZ=FEAT.z,SZ=Math.max(FEAT.w,FEAT.d),SIDE=[-F[1],F[0]];
