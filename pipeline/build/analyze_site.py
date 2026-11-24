@@ -730,11 +730,14 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
     # ---- roads for street direction and street-facing doors
     VEH = {'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street', 'service',
            'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'}
-    rx = []
+    # the street a building faces: public through-streets first; service roads (alleys) only when there is no other
+    rx, rx_service = [], []
     for w in F.get('ways', []):
         if w['kind'] in VEH and w.get('service') not in ('driveway', 'parking_aisle'):
             ls = LineString(w['centerline'])
-            rx += [ls.interpolate(t).coords[0] for t in np.arange(0, ls.length, 6.0)]
+            pts_ = [ls.interpolate(t).coords[0] for t in np.arange(0, ls.length, 6.0)]
+            (rx_service if w['kind'] == 'service' else rx).extend(pts_)
+    if not rx: rx = rx_service
     roads_xy = np.array(rx) if rx else None
     def front_of(pg):
         c_ = pg.centroid
@@ -814,7 +817,7 @@ def analyze(folder, verbose=True, buffer_ft=100.0, whole_max_ft2=40000.0):
         # does not describe a simple house, or for any other type, the general solids method is used.
         hh = None
         btype = classify_type(tags, pg, Pp, terr, context)
-        if btype['type'] == 'house' and pg.area <= 3500 and b['support'] >= 0.5 and not cut_lines:
+        if btype['type'] == 'house' and pg.area <= (6000 if btype['status'] == 'mapped' else 3500) and b['support'] >= 0.5 and not cut_lines:
             sP = Pp[Pp[:, 3] <= 1][:, :3]
             if len(sP) >= 60:
                 planes = ransac_planes(sP)

@@ -398,7 +398,18 @@ const WIN=[],DOORS=[];
 function buildMesh(H,wallCol){const g=new THREE.Group();g.userData.id=H.id;scene.add(g);GROUPS[H.id]=g;const M=H.mesh;
   const add=(m,mat,cast=true)=>{const ge=geo(m);if(!ge)return;const o=new THREE.Mesh(ge,mat);o.castShadow=cast;o.receiveShadow=true;o.userData.id=H.id;g.add(o);pick.push(o)};
   const house=(H.building_type||{}).type==='house'&&(H.template||{}).status==='chosen';
-  const wm=house?mk(sidingDraw(wallCol),4.67,256):wallMat(wallCol);   // siding: a labelled default for the house type
+  const L=H.look;
+  const wm=L&&L.front?(L.front.material==='brick'?MAT.brick:mk(sidingDraw(L.front.color),4.67,256)):(house?mk(sidingDraw(wallCol),4.67,256):wallMat(wallCol));   // observed facade, else typed default
+  if(L&&L.shutters){const SHm=solid(parseInt(L.shutters.slice(1),16));for(const[x,y,z,ry,w,h]of(H.windows||[])){if(h<3)continue;const tx=Math.cos(ry),tz=-Math.sin(ry),nx=Math.sin(ry)*.12,nz=Math.cos(ry)*.12;
+    for(const sd of[-1,1]){const o=sd*(w/2+w*.26+.15);const b=mesh(new THREE.BoxGeometry(w*.5,h,.18),SHm,x+tx*o+nx,y,z+tz*o+nz,g,false);b.rotation.y=ry}}}
+  if(L&&L.porch){const P=L.porch,fd=(H.doors||[]).find(d=>!/garage|driveway/.test(d[5]));if(fd){const[x,y,z,ry]=fd,pg=new THREE.Group();pg.position.set(x,y,z);pg.rotation.y=ry;scene.add(pg);
+    const W=P.width_ft||30,D=P.depth_ft||8,fl=P.floor_ft||3,ht=9,cx=P.offset_ft||0,nC=Math.max(3,Math.round(W/8));
+    box(W,fl,D,P.base==='brick'?MAT.brick:MAT.conc,cx,fl/2,D/2,pg);
+    for(let k=0;k<=nC;k++){const xx=cx-W/2+.6+k*(W-1.2)/nC;mesh(new THREE.CylinderGeometry(.42,.48,ht,12),MAT.trim,xx,fl+ht/2,D-.6,pg)}
+    if(P.rail){for(const yy of[fl+.25,fl+2.9])box(W-1,.25,.25,MAT.trim,cx,yy,D-.6,pg,false);for(let k=0;k<W*2;k++){const xx=cx-W/2+.5+k*.5;if(Math.abs(xx)<3)continue;box(.12,2.6,.12,MAT.trim,xx,fl+1.55,D-.6,pg,false)}}
+    box(W+1.2,.8,D+1,MAT.trim,cx,fl+ht+.4,D/2,pg);const rf=box(W+1.6,.5,D+2,MAT.shingle||roofMat(H.roof_color,false),cx,fl+ht+1.3,D/2-.2,pg);rf.rotation.x=.18;
+    if(P.pediment){const sh=new THREE.Shape();sh.moveTo(-5,0);sh.lineTo(5,0);sh.lineTo(0,3);sh.closePath();mesh(new THREE.ExtrudeGeometry(sh,{depth:.6,bevelEnabled:false}),MAT.trim,0,fl+ht+.8,D+.1,pg)}
+    for(let k=0;k<Math.ceil(fl/.6);k++)box(7,.6,1.1,P.steps==='brick'?MAT.brick:MAT.conc,0,fl-.3-k*.6,D+.55+k*1.1,pg)}}
   add(M.roof,roofMat(H.roof_color,false));add(M.roof_flat,H.roof_flat_color?roofMat(H.roof_flat_color,true):MEMBRANE);
   add(M.walls,wm);add(M.steps,wm,false);add(M.fascia,FASCIA,false);add(M.section,SECTION);
   (H.windows||[]).forEach(w=>WIN.push(w));(H.doors||[]).forEach(d=>DOORS.push(d));
